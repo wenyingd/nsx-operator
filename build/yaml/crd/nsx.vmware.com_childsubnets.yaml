@@ -1,0 +1,166 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.11.0
+  creationTimestamp: null
+  name: childsubnets.nsx.vmware.com
+spec:
+  group: nsx.vmware.com
+  names:
+    kind: ChildSubnet
+    listKind: ChildSubnetList
+    plural: childsubnets
+    singular: childsubnet
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: The number of total claimed child subnets
+      jsonPath: .status.count.claimed
+      name: Claimed
+      type: integer
+    - description: The number of successfully allocated child subnets
+      jsonPath: .status.count.allocated
+      name: Allocated
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ChildSubnet is the Schema for the childsubnets API.
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ChildSubnetSpec defines the desired state of ChildSubnet.
+            properties:
+              DHCPConfig:
+                description: DHCPConfig DHCP configuration.
+                properties:
+                  dhcpRelayConfigPath:
+                    description: DHCPRelayConfigPath is policy path of DHCP-relay-config.
+                    type: string
+                  dhcpV4PoolSize:
+                    default: 80
+                    description: DHCPV4PoolSize IPs in % to be reserved for DHCP ranges.
+                      By default, 80% of IPv4 IPs will be reserved for DHCP. Configure
+                      0 if no pool is required.
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  dhcpV6PoolSize:
+                    default: 2000
+                    description: DHCPV6PoolSize number of IPs to be reserved for DHCP
+                      ranges. By default, 2000 IPv6 IPs will be reserved for DHCP.
+                    type: integer
+                  dnsClientConfig:
+                    description: DNSClientConfig holds DNS configurations.
+                    properties:
+                      dnsServersIPs:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  enableDHCP:
+                    default: false
+                    type: boolean
+                type: object
+              SubnetPrefixLength:
+                description: Size of Subnet based upon estimated workload count.
+                maximum: 128
+                minimum: 1
+                type: integer
+              accessMode:
+                description: Access mode of Subnet, accessible only from within VPC
+                  or from outside VPC.
+                enum:
+                - Private
+                - Public
+                type: string
+              advancedConfig:
+                description: Subnet advanced configuration.
+                properties:
+                  staticIPAllocation:
+                    description: StaticIPAllocation configuration for subnet ports
+                      with VIF attachment.
+                    properties:
+                      enable:
+                        default: false
+                        description: Enable or disable static IP allocation for subnet
+                          ports with VIF attachment.
+                        type: boolean
+                    type: object
+                type: object
+              ipVersion:
+                description: IP version.
+                enum:
+                - ipv4
+                - ipv6
+                - dual
+                type: string
+              parent:
+                description: Workload cluster identifier.
+                type: string
+            required:
+            - ipVersion
+            - parent
+            type: object
+          status:
+            description: ChildSubnetStatus defines the observed state of ChildSubnet.
+            properties:
+              conditions:
+                items:
+                  description: Condition defines condition of custom resource.
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transitioned from one status
+                        to another. This should be when the underlying condition changed.
+                        If that is not known, then using the time when the API field
+                        changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message shows a human-readable message about condition.
+                      type: string
+                    reason:
+                      description: Reason shows a brief reason of condition.
+                      type: string
+                    status:
+                      description: Status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: Type defines condition type.
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                type: array
+              ipAddresses:
+                description: Subnet addresses. It is supposed to be one IPv4 address
+                  and IPv6 address at most. The format for each IPAddress should be
+                  $gateway/$prefixLength
+                items:
+                  type: string
+                type: array
+              nsxResourcePath:
+                type: string
+              vlan:
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
