@@ -132,6 +132,7 @@ func buildNetworkConfigInfo(vpcConfigCR v1alpha1.VPCNetworkConfiguration) (*comm
 		DefaultIPv4SubnetSize:   vpcConfigCR.Spec.DefaultIPv4SubnetSize,
 		DefaultSubnetAccessMode: vpcConfigCR.Spec.DefaultSubnetAccessMode,
 		ShortID:                 vpcConfigCR.Spec.ShortID,
+		VPCPath:                 vpcConfigCR.Spec.VPC,
 	}
 	return ninfo, nil
 }

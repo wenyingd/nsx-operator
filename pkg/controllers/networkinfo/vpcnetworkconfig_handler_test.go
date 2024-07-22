@@ -90,6 +90,12 @@ func TestBuildNetworkConfigInfo(t *testing.T) {
 		DefaultSubnetAccessMode: "Private",
 		NSXTProject:             "/orgs/anotherOrg/projects/anotherProject",
 	}
+	spec3 := v1alpha1.VPCNetworkConfigurationSpec{
+		DefaultIPv4SubnetSize:   28,
+		DefaultSubnetAccessMode: "Private",
+		NSXTProject:             "/orgs/anotherOrg/projects/anotherProject",
+		VPC:                     "vpc33",
+	}
 	testCRD1 := v1alpha1.VPCNetworkConfiguration{
 		Spec: spec1,
 	}
@@ -109,6 +115,16 @@ func TestBuildNetworkConfigInfo(t *testing.T) {
 	}
 	testCRD3.Name = "test-3"
 
+	testCRD4 := v1alpha1.VPCNetworkConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				types.AnnotationDefaultNetworkConfig: "false",
+			},
+		},
+		Spec: spec3,
+	}
+	testCRD3.Name = "test-4"
+
 	tests := []struct {
 		name       string
 		nc         v1alpha1.VPCNetworkConfiguration
@@ -119,10 +135,12 @@ func TestBuildNetworkConfigInfo(t *testing.T) {
 		subnetSize int
 		accessMode string
 		isDefault  bool
+		vpcPath    string
 	}{
-		{"1", testCRD1, "test-gw-path-1", "test-edge-path-1", "default", "nsx_operator_e2e_test", 64, "Public", false},
-		{"2", testCRD2, "test-gw-path-2", "test-edge-path-2", "anotherOrg", "anotherProject", 32, "Private", false},
-		{"3", testCRD3, "test-gw-path-2", "test-edge-path-2", "anotherOrg", "anotherProject", 32, "Private", true},
+		{"1", testCRD1, "test-gw-path-1", "test-edge-path-1", "default", "nsx_operator_e2e_test", 64, "Public", false, ""},
+		{"2", testCRD2, "test-gw-path-2", "test-edge-path-2", "anotherOrg", "anotherProject", 32, "Private", false, ""},
+		{"3", testCRD3, "test-gw-path-2", "test-edge-path-2", "anotherOrg", "anotherProject", 32, "Private", true, ""},
+		{"with-preCreatedVPC", testCRD4, "", "", "anotherOrg", "anotherProject", 28, "Private", false, "vpc33"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,6 +153,7 @@ func TestBuildNetworkConfigInfo(t *testing.T) {
 			assert.Equal(t, tt.subnetSize, nc.DefaultIPv4SubnetSize)
 			assert.Equal(t, tt.accessMode, nc.DefaultSubnetAccessMode)
 			assert.Equal(t, tt.isDefault, nc.IsDefault)
+			assert.Equal(t, tt.vpcPath, nc.VPCPath)
 		})
 	}
 

@@ -480,6 +480,7 @@ func BuildBasicTags(cluster string, obj interface{}, namespaceID types.UID) []mo
 		tags = append(tags, model.Tag{Scope: String(common.TagScopePodUID), Tag: String(string(i.UID))})
 	case *v1alpha1.NetworkInfo:
 		tags = append(tags, model.Tag{Scope: String(common.TagScopeNamespace), Tag: String(i.ObjectMeta.Namespace)})
+		tags = append(tags, model.Tag{Scope: String(common.TagScopeVPCManagedBy), Tag: String(common.AutoCreatedVPCTagValue)})
 	case *v1alpha2.IPPool:
 		tags = append(tags, model.Tag{Scope: String(common.TagScopeNamespace), Tag: String(i.ObjectMeta.Namespace)})
 		tags = append(tags, model.Tag{Scope: String(common.TagScopeIPPoolCRName), Tag: String(i.ObjectMeta.Name)})
