@@ -148,8 +148,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return false, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return false, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateGatewayConnectionStatus", func(_ *vpc.VPCService, _ *servicecommon.VPCNetworkConfigInfo) (bool, string, error) {
 					return true, "", nil
@@ -212,8 +212,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return true, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return true, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateGatewayConnectionStatus", func(_ *vpc.VPCService, _ *servicecommon.VPCNetworkConfigInfo) (bool, string, error) {
 					assert.FailNow(t, "should not be called")
@@ -276,8 +276,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return false, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return false, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateGatewayConnectionStatus", func(_ *vpc.VPCService, _ *servicecommon.VPCNetworkConfigInfo) (bool, string, error) {
 					assert.FailNow(t, "should not be called")
@@ -323,8 +323,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return false, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return false, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateGatewayConnectionStatus", func(_ *vpc.VPCService, _ *servicecommon.VPCNetworkConfigInfo) (bool, string, error) {
 					assert.FailNow(t, "should not be called")
@@ -370,8 +370,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return false, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return false, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateGatewayConnectionStatus", func(_ *vpc.VPCService, _ *servicecommon.VPCNetworkConfigInfo) (bool, string, error) {
 					return true, "", nil
@@ -455,8 +455,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return false, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return false, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateGatewayConnectionStatus", func(_ *vpc.VPCService, _ *servicecommon.VPCNetworkConfigInfo) (bool, string, error) {
 					return true, "", nil
@@ -532,8 +532,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return true, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return true, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateGatewayConnectionStatus", func(_ *vpc.VPCService, _ *servicecommon.VPCNetworkConfigInfo) (bool, string, error) {
 					return true, "", nil
@@ -612,8 +612,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return false, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return false, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "ValidateGatewayConnectionStatus", func(_ *vpc.VPCService, _ *servicecommon.VPCNetworkConfigInfo) (bool, string, error) {
 					return true, "", nil
@@ -689,8 +689,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					}, true
 
 				})
-				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string, error) {
-					return true, "", nil
+				patches.ApplyFunc(getGatewayConnectionStatus, func(_ context.Context, _ *v1alpha1.VPCNetworkConfiguration) (bool, string) {
+					return true, ""
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetLBProvider", func(_ *vpc.VPCService) vpc.LBProvider {
 					return vpc.AVILB
