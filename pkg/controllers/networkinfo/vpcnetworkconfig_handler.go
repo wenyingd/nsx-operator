@@ -3,20 +3,24 @@ package networkinfo
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
-
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
-
-	commontypes "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
+	commontypes "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
+)
+
+var (
+	retryInterval = 10 * time.Second
 )
 
 // VPCNetworkConfigurationHandler handles VPC NetworkConfiguration event, and reconcile VPC event:
@@ -25,25 +29,35 @@ import (
 // - VPC Network Configuration update:	Only support updating external/private ipblocks, update values in cache
 
 type VPCNetworkConfigurationHandler struct {
-	Client     client.Client
-	vpcService commontypes.VPCServiceProvider
+	Client              client.Client
+	vpcService          commontypes.VPCServiceProvider
+	ipBlocksInfoService commontypes.IPBlocksInfoServiceProvider
 }
 
-func (h *VPCNetworkConfigurationHandler) Create(_ context.Context, e event.CreateEvent, _ workqueue.RateLimitingInterface) {
+func (h *VPCNetworkConfigurationHandler) Create(ctx context.Context, e event.CreateEvent, _ workqueue.RateLimitingInterface) {
 	vpcConfigCR := e.Object.(*v1alpha1.VPCNetworkConfiguration)
 	vname := vpcConfigCR.GetName()
-	ninfo, _err := buildNetworkConfigInfo(*vpcConfigCR)
-	if _err != nil {
-		log.Error(_err, "processing network config add event failed")
+	ninfo, err := buildNetworkConfigInfo(*vpcConfigCR)
+	if err != nil {
+		log.Error(err, "processing network config add event failed")
 		return
 	}
 	log.Info("create network config and update to store", "NetworkConfigInfo", ninfo)
 	h.vpcService.RegisterVPCNetworkConfig(vname, *ninfo)
+	// Update IPBlocks info
+	if err = h.ipBlocksInfoService.UpdateIPBlocksInfo(ctx, vpcConfigCR); err != nil {
+		log.Error(err, "failed to update the IPBblocksInfo", "VPCNetworkConfiguration", vname)
+	}
 }
 
-func (h *VPCNetworkConfigurationHandler) Delete(_ context.Context, e event.DeleteEvent, _ workqueue.RateLimitingInterface) {
-	// Currently we do not support deleting networkconfig
-	log.V(1).Info("do not support VPC network config deletion")
+func (h *VPCNetworkConfigurationHandler) Delete(ctx context.Context, e event.DeleteEvent, w workqueue.RateLimitingInterface) {
+	vpcConfigCR := e.Object.(*v1alpha1.VPCNetworkConfiguration)
+	if err := h.ipBlocksInfoService.SyncIPBlocksInfo(ctx); err != nil {
+		log.Error(err, "failed to synchronize IPBlocksInfo when deleting %s", vpcConfigCR.Name)
+		w.AddAfter(e.Object.GetName(), retryInterval)
+	} else {
+		h.ipBlocksInfoService.ResetPeriodicSync()
+	}
 }
 
 func (h *VPCNetworkConfigurationHandler) Generic(_ context.Context, _ event.GenericEvent, _ workqueue.RateLimitingInterface) {
@@ -52,12 +66,11 @@ func (h *VPCNetworkConfigurationHandler) Generic(_ context.Context, _ event.Gene
 
 func (h *VPCNetworkConfigurationHandler) Update(ctx context.Context, e event.UpdateEvent, q workqueue.RateLimitingInterface) {
 	log.V(1).Info("start processing VPC network config update event")
-	oldNc := e.ObjectOld.(*v1alpha1.VPCNetworkConfiguration)
 	newNc := e.ObjectNew.(*v1alpha1.VPCNetworkConfiguration)
 
-	if getListSize(oldNc.Spec.ExternalIPv4Blocks) == getListSize(newNc.Spec.ExternalIPv4Blocks) &&
-		getListSize(oldNc.Spec.PrivateIPv4CIDRs) == getListSize(newNc.Spec.PrivateIPv4CIDRs) {
-		log.V(1).Info("only support updating external/private ipv4 cidr, no change")
+	oldNc := e.ObjectOld.(*v1alpha1.VPCNetworkConfiguration)
+	if reflect.DeepEqual(oldNc.Spec, newNc.Spec) {
+		log.Info("Skip processing VPC network config update event", "newNc", newNc, "oldNc", oldNc)
 		return
 	}
 
@@ -98,40 +111,29 @@ var VPCNetworkConfigurationPredicate = predicate.Funcs{
 		return true
 	},
 	DeleteFunc: func(e event.DeleteEvent) bool {
-		return false
+		return true
 	},
 	GenericFunc: func(genericEvent event.GenericEvent) bool {
 		return false
 	},
 }
 
-func getListSize(s []string) int {
-	if s == nil {
-		return 0
-	} else {
-		return len(s)
-	}
-}
-
 func buildNetworkConfigInfo(vpcConfigCR v1alpha1.VPCNetworkConfiguration) (*commontypes.VPCNetworkConfigInfo, error) {
-	org, project, err := nsxtProjectPathToId(vpcConfigCR.Spec.NSXTProject)
+	org, project, err := nsxtProjectPathToId(vpcConfigCR.Spec.NSXProject)
 	if err != nil {
-		log.Error(err, "failed to parse nsx-t project in network config", "Project Path", vpcConfigCR.Spec.NSXTProject)
+		log.Error(err, "failed to parse NSX project in network config", "Project Path", vpcConfigCR.Spec.NSXProject)
 		return nil, err
 	}
 
 	ninfo := &commontypes.VPCNetworkConfigInfo{
-		IsDefault:               isDefaultNetworkConfigCR(vpcConfigCR),
-		Org:                     org,
-		Name:                    vpcConfigCR.Name,
-		DefaultGatewayPath:      vpcConfigCR.Spec.DefaultGatewayPath,
-		EdgeClusterPath:         vpcConfigCR.Spec.EdgeClusterPath,
-		NsxtProject:             project,
-		ExternalIPv4Blocks:      vpcConfigCR.Spec.ExternalIPv4Blocks,
-		PrivateIPv4CIDRs:        vpcConfigCR.Spec.PrivateIPv4CIDRs,
-		DefaultIPv4SubnetSize:   vpcConfigCR.Spec.DefaultIPv4SubnetSize,
-		DefaultSubnetAccessMode: vpcConfigCR.Spec.DefaultSubnetAccessMode,
-		ShortID:                 vpcConfigCR.Spec.ShortID,
+		IsDefault:              isDefaultNetworkConfigCR(vpcConfigCR),
+		Org:                    org,
+		Name:                   vpcConfigCR.Name,
+		VPCConnectivityProfile: vpcConfigCR.Spec.VPCConnectivityProfile,
+		NSXProject:             project,
+		PrivateIPs:             vpcConfigCR.Spec.PrivateIPs,
+		DefaultSubnetSize:      vpcConfigCR.Spec.DefaultSubnetSize,
+		VPCPath:                vpcConfigCR.Spec.VPC,
 	}
 	return ninfo, nil
 }
@@ -150,7 +152,7 @@ func isDefaultNetworkConfigCR(vpcConfigCR v1alpha1.VPCNetworkConfiguration) bool
 	return false
 }
 
-// parse org id and project id from nsxtProject path
+// parse org id and project id from nsxProject path
 // example /orgs/default/projects/nsx_operator_e2e_test
 func nsxtProjectPathToId(path string) (string, string, error) {
 	parts := strings.Split(path, "/")

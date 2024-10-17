@@ -15,7 +15,6 @@
 package e2e
 
 import (
-	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -23,7 +22,7 @@ import (
 )
 
 const (
-	SP = "securitypolicy"
+	SP = "securitypolicies.crd.nsx.vmware.com"
 )
 
 // TestSecurityPolicyBasicTraffic verifies that the basic traffic of security policy.
@@ -31,8 +30,8 @@ const (
 func TestSecurityPolicyBasicTraffic(t *testing.T) {
 	ns := "test-security-policy-1"
 	securityPolicyName := "isolate-policy-1"
-	ruleName0 := "all-ingress-isolation"
-	ruleName1 := "all-egress-isolation"
+	ruleName0 := "all_ingress_isolation"
+	ruleName1 := "all_egress_isolation"
 	var err error
 	setupTest(t, ns)
 	defer teardownTest(t, ns, defaultTimeout)
@@ -108,8 +107,8 @@ func TestSecurityPolicyBasicTraffic(t *testing.T) {
 func TestSecurityPolicyAddDeleteRule(t *testing.T) {
 	ns := "test-security-policy-2"
 	securityPolicyName := "isolate-policy-1"
-	ruleName0 := "all-ingress-isolation"
-	ruleName1 := "all-egress-isolation"
+	ruleName0 := "all_ingress_isolation"
+	ruleName1 := "all_egress_isolation"
 	setupTest(t, ns)
 	defer teardownTest(t, ns, defaultTimeout)
 
@@ -241,11 +240,10 @@ func TestSecurityPolicyNamedPortWithoutPod(t *testing.T) {
 	nsClient := "client"
 	nsWeb := "web"
 	securityPolicyCRName := "named-port-policy-without-pod"
-	securityPolicyNSXDisplayName := fmt.Sprintf("sp-%s-%s", nsWeb, securityPolicyCRName)
 	webA := "web"
 	labelWeb := "tcp-deployment"
-	ruleName0 := "all-ingress-isolation"
-	ruleName1 := "all-egress-isolation"
+	ruleName0 := "all_ingress_isolation"
+	ruleName1 := "all_egress_isolation"
 
 	testData.deleteNamespace(nsClient, defaultTimeout)
 	testData.deleteNamespace(nsWeb, defaultTimeout)
@@ -266,7 +264,7 @@ func TestSecurityPolicyNamedPortWithoutPod(t *testing.T) {
 	assertNil(t, err, "Error when waiting for Security Policy %s", securityPolicyCRName)
 
 	// Check NSX resource existing
-	err = testData.waitForResourceExistOrNot(nsWeb, common.ResourceTypeSecurityPolicy, securityPolicyNSXDisplayName, true)
+	err = testData.waitForResourceExistOrNot(nsWeb, common.ResourceTypeSecurityPolicy, securityPolicyCRName, true)
 	assertNil(t, err)
 	err = testData.waitForResourceExistOrNot(nsWeb, common.ResourceTypeRule, ruleName0, true)
 	assertNil(t, err)

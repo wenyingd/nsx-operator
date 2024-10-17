@@ -1,9 +1,12 @@
 package common
 
 import (
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"context"
 
 	"github.com/vmware/vsphere-automation-sdk-go/services/nsxt/model"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 )
 
 // VPCServiceProvider provides to methods other controllers and services.
@@ -26,7 +29,9 @@ type SubnetServiceProvider interface {
 	GetSubnetByPath(path string) (*model.VpcSubnet, error)
 	GetSubnetsByIndex(key, value string) []*model.VpcSubnet
 	CreateOrUpdateSubnet(obj client.Object, vpcInfo VPCResourceInfo, tags []model.Tag) (string, error)
-	GenerateSubnetNSTags(obj client.Object, nsUID string) []model.Tag
+	GenerateSubnetNSTags(obj client.Object) []model.Tag
+	LockSubnet(path *string)
+	UnlockSubnet(path *string)
 }
 
 type SubnetPortServiceProvider interface {
@@ -35,4 +40,10 @@ type SubnetPortServiceProvider interface {
 
 type NodeServiceReader interface {
 	GetNodeByName(nodeName string) []*model.HostTransportNode
+}
+
+type IPBlocksInfoServiceProvider interface {
+	SyncIPBlocksInfo(ctx context.Context) error
+	UpdateIPBlocksInfo(ctx context.Context, vpcConfigCR *v1alpha1.VPCNetworkConfiguration) error
+	ResetPeriodicSync()
 }

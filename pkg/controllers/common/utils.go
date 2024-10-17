@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	servicecommon "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/util"
@@ -35,11 +36,13 @@ func AllocateSubnetFromSubnetSet(subnetSet *v1alpha1.SubnetSet, vpcService servi
 			// totalIP will be overrided if IpAddresses are specified.
 			totalIP, _ = util.CalculateIPFromCIDRs(nsxSubnet.IpAddresses)
 		}
-		if portNums < totalIP-3 {
+		// NSX reserves 4 ip addresses in each subnet for network address, gateway address,
+		// dhcp server address and broadcast address.
+		if portNums < totalIP-4 {
 			return *nsxSubnet.Path, nil
 		}
 	}
-	tags := subnetService.GenerateSubnetNSTags(subnetSet, subnetSet.Namespace)
+	tags := subnetService.GenerateSubnetNSTags(subnetSet)
 	if tags == nil {
 		return "", errors.New("failed to generate subnet tags")
 	}
@@ -120,24 +123,39 @@ func NodeIsMaster(node *v1.Node) bool {
 	return false
 }
 
-func GetVirtualMachineNameForSubnetPort(subnetPort *v1alpha1.SubnetPort) (string, error) {
+func GetVirtualMachineNameForSubnetPort(subnetPort *v1alpha1.SubnetPort) (string, string, error) {
 	annotations := subnetPort.GetAnnotations()
 	if annotations == nil {
-		return "", nil
+		return "", "", nil
 	}
 	attachmentRef, exist := annotations[servicecommon.AnnotationAttachmentRef]
 	if !exist {
-		return "", nil
+		return "", "", nil
 	}
 	array := strings.Split(attachmentRef, "/")
-	if len(array) != 2 || !strings.EqualFold(array[0], servicecommon.ResourceTypeVirtualMachine) {
+	if len(array) != 3 || !strings.EqualFold(array[0], servicecommon.ResourceTypeVirtualMachine) {
 		err := fmt.Errorf("invalid annotation value of '%s': %s", servicecommon.AnnotationAttachmentRef, attachmentRef)
-		return "", err
+		return "", "", err
 	}
-	return array[1], nil
+	return array[1], array[2], nil
 }
 
 // NumReconcile now uses the fix number of concurrency
 func NumReconcile() int {
 	return MaxConcurrentReconciles
+}
+
+func GenericGarbageCollector(cancel chan bool, timeout time.Duration, f func(ctx context.Context)) {
+	ctx := context.Background()
+	ticker := time.NewTicker(timeout)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-cancel:
+			return
+		case <-ticker.C:
+			f(ctx)
+		}
+	}
 }

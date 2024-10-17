@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/legacy/v1alpha1"
 	"github.com/vmware-tanzu/nsx-operator/pkg/config"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
@@ -24,26 +24,40 @@ import (
 func TestSecurityPolicyService_buildRuleIPGroup(t *testing.T) {
 	sp := &v1alpha1.SecurityPolicy{
 		ObjectMeta: v1.ObjectMeta{Namespace: "ns1", Name: "spA", UID: "uidA"},
+		Spec: v1alpha1.SecurityPolicySpec{
+			Rules: []v1alpha1.SecurityPolicyRule{
+				{
+					Action:    &allowAction,
+					Direction: &directionIn,
+					Sources: []v1alpha1.SecurityPolicyPeer{
+						{
+							PodSelector: &v1.LabelSelector{
+								MatchLabels: map[string]string{"pod_selector_1": "pod_value_1"},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
-	rule := v1alpha1.SecurityPolicyRule{}
 	nsxRule := model.Rule{
 		DisplayName:       &ruleNameWithPodSelector00,
 		Id:                &ruleIDPort000,
 		DestinationGroups: []string{"ANY"},
-		Direction:         &nsxDirectionIn,
+		Direction:         &nsxRuleDirectionIn,
 		Scope:             []string{"/infra/domains/k8scl-one/groups/sp_uidA_0_scope"},
 		SequenceNumber:    &seq0,
 		Services:          []string{"ANY"},
 		SourceGroups:      []string{"/infra/domains/k8scl-one/groups/sp_uidA_0_src"},
-		Action:            &nsxActionAllow,
+		Action:            &nsxRuleActionAllow,
 		ServiceEntries:    []*data.StructValue{},
 		Tags:              basicTags,
 	}
 	ips := []string{"1.1.1.1", "2.2.2.2"}
 
 	policyGroupID := fmt.Sprintf("%s_ipset", ruleIDPort000)
-	policyGroupName := fmt.Sprintf("%s-ipset", ruleNameWithPodSelector00)
+	policyGroupName := fmt.Sprintf("%s_ipset", ruleNameWithPodSelector00)
 	addresses := data.NewListValue()
 	for _, ip := range ips {
 		addresses.Add(data.NewStringValue(ip))
@@ -66,7 +80,7 @@ func TestSecurityPolicyService_buildRuleIPGroup(t *testing.T) {
 		DisplayName: &policyGroupName,
 		Expression:  []*data.StructValue{blockExpression},
 		// build ipset group tags from input securitypolicy and securitypolicy rule
-		Tags: service.buildPeerTags(sp, &rule, 0, false, false, common.ResourceTypeSecurityPolicy),
+		Tags: service.buildPeerTags(sp, &sp.Spec.Rules[0], 0, false, false, false, common.ResourceTypeSecurityPolicy),
 	}
 
 	type args struct {
@@ -82,7 +96,7 @@ func TestSecurityPolicyService_buildRuleIPGroup(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equalf(t, tt.want, service.buildRuleIPSetGroup(sp, &rule, tt.args.obj, tt.args.ips, 0, common.ResourceTypeSecurityPolicy), "buildRuleIPSetGroup(%v, %v)",
+			assert.Equalf(t, tt.want, service.buildRuleIPSetGroup(sp, &sp.Spec.Rules[0], tt.args.obj, tt.args.ips, 0, common.ResourceTypeSecurityPolicy), "buildRuleIPSetGroup(%v, %v)",
 				tt.args.obj, tt.args.ips)
 		})
 	}

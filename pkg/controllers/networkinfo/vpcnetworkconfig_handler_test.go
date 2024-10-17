@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 	types "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 )
 
@@ -64,7 +64,7 @@ func TestBuildNetworkConfigInfo(t *testing.T) {
 	emptyCRD := &v1alpha1.VPCNetworkConfiguration{}
 	emptyCRD2 := &v1alpha1.VPCNetworkConfiguration{
 		Spec: v1alpha1.VPCNetworkConfigurationSpec{
-			NSXTProject: "/invalid/path",
+			NSXProject: "/invalid/path",
 		},
 	}
 	_, e := buildNetworkConfigInfo(*emptyCRD)
@@ -73,22 +73,20 @@ func TestBuildNetworkConfigInfo(t *testing.T) {
 	assert.NotNil(t, e)
 
 	spec1 := v1alpha1.VPCNetworkConfigurationSpec{
-		DefaultGatewayPath:      "test-gw-path-1",
-		EdgeClusterPath:         "test-edge-path-1",
-		ExternalIPv4Blocks:      []string{"external-ipb-1", "external-ipb-2"},
-		PrivateIPv4CIDRs:        []string{"private-ipb-1", "private-ipb-2"},
-		DefaultIPv4SubnetSize:   64,
-		DefaultSubnetAccessMode: "Public",
-		NSXTProject:             "/orgs/default/projects/nsx_operator_e2e_test",
+		PrivateIPs:             []string{"private-ipb-1", "private-ipb-2"},
+		DefaultSubnetSize:      64,
+		VPCConnectivityProfile: "test-VPCConnectivityProfile",
+		NSXProject:             "/orgs/default/projects/nsx_operator_e2e_test",
 	}
 	spec2 := v1alpha1.VPCNetworkConfigurationSpec{
-		DefaultGatewayPath:      "test-gw-path-2",
-		EdgeClusterPath:         "test-edge-path-2",
-		ExternalIPv4Blocks:      []string{"external-ipb-1", "external-ipb-2"},
-		PrivateIPv4CIDRs:        []string{"private-ipb-1", "private-ipb-2"},
-		DefaultIPv4SubnetSize:   32,
-		DefaultSubnetAccessMode: "Private",
-		NSXTProject:             "/orgs/anotherOrg/projects/anotherProject",
+		PrivateIPs:        []string{"private-ipb-1", "private-ipb-2"},
+		DefaultSubnetSize: 32,
+		NSXProject:        "/orgs/anotherOrg/projects/anotherProject",
+	}
+	spec3 := v1alpha1.VPCNetworkConfigurationSpec{
+		DefaultSubnetSize: 28,
+		NSXProject:        "/orgs/anotherOrg/projects/anotherProject",
+		VPC:               "vpc33",
 	}
 	testCRD1 := v1alpha1.VPCNetworkConfiguration{
 		Spec: spec1,
@@ -109,33 +107,43 @@ func TestBuildNetworkConfigInfo(t *testing.T) {
 	}
 	testCRD3.Name = "test-3"
 
+	testCRD4 := v1alpha1.VPCNetworkConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				types.AnnotationDefaultNetworkConfig: "false",
+			},
+		},
+		Spec: spec3,
+	}
+	testCRD3.Name = "test-4"
+
 	tests := []struct {
-		name       string
-		nc         v1alpha1.VPCNetworkConfiguration
-		gw         string
-		edge       string
-		org        string
-		project    string
-		subnetSize int
-		accessMode string
-		isDefault  bool
+		name                   string
+		nc                     v1alpha1.VPCNetworkConfiguration
+		gw                     string
+		edge                   string
+		org                    string
+		project                string
+		subnetSize             int
+		accessMode             string
+		isDefault              bool
+		vpcConnectivityProfile string
+		vpcPath                string
 	}{
-		{"1", testCRD1, "test-gw-path-1", "test-edge-path-1", "default", "nsx_operator_e2e_test", 64, "Public", false},
-		{"2", testCRD2, "test-gw-path-2", "test-edge-path-2", "anotherOrg", "anotherProject", 32, "Private", false},
-		{"3", testCRD3, "test-gw-path-2", "test-edge-path-2", "anotherOrg", "anotherProject", 32, "Private", true},
+		{"test-nsxtProjectPathToId", testCRD1, "test-gw-path-1", "test-edge-path-1", "default", "nsx_operator_e2e_test", 64, "Public", false, "", ""},
+		{"with-VPCConnectivityProfile", testCRD2, "test-gw-path-2", "test-edge-path-2", "anotherOrg", "anotherProject", 32, "Private", false, "test-VPCConnectivityProfile", ""},
+		{"with-defaultNetworkConfig", testCRD3, "test-gw-path-2", "test-edge-path-2", "anotherOrg", "anotherProject", 32, "Private", true, "", ""},
+		{"with-preCreatedVPC", testCRD4, "", "", "anotherOrg", "anotherProject", 28, "Private", false, "", "vpc33"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nc, e := buildNetworkConfigInfo(tt.nc)
 			assert.Nil(t, e)
-			assert.Equal(t, tt.gw, nc.DefaultGatewayPath)
-			assert.Equal(t, tt.edge, nc.EdgeClusterPath)
 			assert.Equal(t, tt.org, nc.Org)
-			assert.Equal(t, tt.project, nc.NsxtProject)
-			assert.Equal(t, tt.subnetSize, nc.DefaultIPv4SubnetSize)
-			assert.Equal(t, tt.accessMode, nc.DefaultSubnetAccessMode)
+			assert.Equal(t, tt.project, nc.NSXProject)
+			assert.Equal(t, tt.subnetSize, nc.DefaultSubnetSize)
 			assert.Equal(t, tt.isDefault, nc.IsDefault)
+			assert.Equal(t, tt.vpcPath, nc.VPCPath)
 		})
 	}
-
 }

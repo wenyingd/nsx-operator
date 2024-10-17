@@ -301,24 +301,24 @@ func TestRuleStore_Apply(t *testing.T) {
 				DisplayName:       &ruleNameWithPodSelector00,
 				Id:                &ruleIDPort000,
 				DestinationGroups: []string{"ANY"},
-				Direction:         &nsxDirectionIn,
+				Direction:         &nsxRuleDirectionIn,
 				Scope:             []string{"/infra/domains/k8scl-one/groups/sp_uidA_0_scope"},
 				SequenceNumber:    &seq0,
 				Services:          []string{"ANY"},
 				SourceGroups:      []string{"/infra/domains/k8scl-one/groups/sp_uidA_0_src"},
-				Action:            &nsxActionAllow,
+				Action:            &nsxRuleActionAllow,
 				Tags:              basicTags,
 			},
 			{
 				DisplayName:       &ruleNameWithNsSelector00,
 				Id:                &ruleIDPort100,
 				DestinationGroups: []string{"ANY"},
-				Direction:         &nsxDirectionIn,
+				Direction:         &nsxRuleDirectionIn,
 				Scope:             []string{"ANY"},
 				SequenceNumber:    &seq1,
 				Services:          []string{"ANY"},
 				SourceGroups:      []string{"/infra/domains/k8scl-one/groups/sp_uidA_1_src"},
-				Action:            &nsxActionAllow,
+				Action:            &nsxRuleActionAllow,
 				Tags:              basicTags,
 			},
 		},
@@ -328,7 +328,7 @@ func TestRuleStore_Apply(t *testing.T) {
 		args    args
 		wantErr assert.ErrorAssertionFunc
 	}{
-		{"1", args{i: &sp}, assert.NoError},
+		{"1", args{i: &sp.Rules}, assert.NoError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -15,10 +15,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	mpmodel "github.com/vmware/vsphere-automation-sdk-go/services/nsxt-mp/nsx/model"
+	"github.com/vmware/vsphere-automation-sdk-go/services/nsxt/model"
 )
 
 func TestHttpErrortoNSXError(t *testing.T) {
@@ -509,4 +512,100 @@ Hce3uM6Xn8sAglod/r+0onZ09yoiH2Qj5EY50wUIOPtey2ilhuhwoo/M7Nt/yomF
 
 	header = CertPemBytesToHeader("/tmp/test.pem")
 	assert.Equal(t, "", header)
+}
+
+func TestCasttoPointer(t *testing.T) {
+	var share *model.Share
+	Id := "test-id"
+	principalI := mpmodel.PrincipalIdentity{Id: &Id}
+	rule := model.Rule{Id: &Id}
+	tag := model.Tag{Scope: &Id}
+	lbs := model.LBService{Id: &Id}
+	share = nil
+	tests := []struct {
+		name string
+		obj  interface{}
+		want interface{}
+	}{
+
+		{
+			name: "PrincipalIdentity",
+			obj:  principalI,
+			want: &principalI,
+		},
+		{
+			name: "Rule",
+			obj:  rule,
+			want: &rule,
+		},
+		// Add more test cases for other types
+		{
+			name: "Tag",
+			obj:  tag,
+			want: &tag,
+		},
+		{
+			name: "LBService pointer",
+			obj:  &lbs,
+			want: &lbs,
+		},
+		{
+			name: "nil",
+			obj:  nil,
+			want: nil,
+		},
+
+		{
+			name: "typed nil",
+			obj:  share,
+			want: share,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CasttoPointer(tt.obj); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("CasttoPointer() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompareArraysWithoutOrder(t *testing.T) {
+	assert.True(t, CompareArraysWithoutOrder([]string{"str1", "str2", "str3"}, []string{"str3", "str2", "str1"}))
+	assert.False(t, CompareArraysWithoutOrder([]string{"str1", "str2", "str3", "str4"}, []string{"str3", "str2", "str1"}))
+}
+
+func TestMergeArraysWithoutDuplicate(t *testing.T) {
+	tests := []struct {
+		name           string
+		old            []string
+		new            []string
+		expectedMerged []string
+	}{
+		{
+			name:           "MergeEmptyNew",
+			old:            []string{"str1", "str2"},
+			new:            nil,
+			expectedMerged: []string{"str1", "str2"},
+		},
+		{
+			name:           "MergeEmptyOld",
+			old:            []string{},
+			new:            []string{"str1", "str2"},
+			expectedMerged: []string{"str1", "str2"},
+		},
+		{
+			name:           "CommonMerge",
+			old:            []string{"str1", "str2", "str5"},
+			new:            []string{"str2", "str3", "str4", "str5"},
+			expectedMerged: []string{"str1", "str2", "str3", "str4", "str5"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actualMerged := MergeArraysWithoutDuplicate(tt.old, tt.new)
+			assert.True(t, CompareArraysWithoutOrder(tt.expectedMerged, actualMerged))
+		})
+	}
 }

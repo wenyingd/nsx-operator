@@ -28,21 +28,51 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/legacy/v1alpha1"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/ratelimiter"
 
 	"github.com/vmware-tanzu/nsx-operator/pkg/config"
 	mock_client "github.com/vmware-tanzu/nsx-operator/pkg/mock/controller-runtime/client"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
-	_ "github.com/vmware-tanzu/nsx-operator/pkg/nsx/ratelimiter"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/securitypolicy"
+	"github.com/vmware-tanzu/nsx-operator/pkg/util"
 )
+
+func fakeService() *securitypolicy.SecurityPolicyService {
+	c := nsx.NewConfig("localhost", "1", "1", []string{}, 10, 3, 20, 20, true, true, true, ratelimiter.AIMD, nil, nil, []string{})
+	cluster, _ := nsx.NewCluster(c)
+	rc, _ := cluster.NewRestConnector()
+
+	service := &securitypolicy.SecurityPolicyService{
+		Service: common.Service{
+			NSXClient: &nsx.Client{
+				QueryClient:            nil,
+				RestConnector:          rc,
+				RealizedEntitiesClient: nil,
+				ProjectInfraClient:     nil,
+				NsxConfig: &config.NSXOperatorConfig{
+					CoeConfig: &config.CoeConfig{
+						Cluster: "k8scl-one:test",
+					},
+				},
+			},
+			NSXConfig: &config.NSXOperatorConfig{
+				CoeConfig: &config.CoeConfig{
+					Cluster:          "k8scl-one:test",
+					EnableVPCNetwork: false,
+				},
+			},
+		},
+	}
+	return service
+}
 
 func NewFakeSecurityPolicyReconciler() *SecurityPolicyReconciler {
 	return &SecurityPolicyReconciler{
 		Client:  fake.NewClientBuilder().Build(),
 		Scheme:  fake.NewClientBuilder().Build().Scheme(),
-		Service: nil,
+		Service: fakeService(),
 	}
 }
 
@@ -60,7 +90,7 @@ func TestSecurityPolicyController_updateSecurityPolicyStatusConditions(t *testin
 			Reason:  "Error occurred while processing the Security Policy CRD. Please check the config and try again",
 		},
 	}
-	r.updateSecurityPolicyStatusConditions(&ctx, dummySP, newConditions)
+	r.updateSecurityPolicyStatusConditions(ctx, dummySP, newConditions)
 
 	if !reflect.DeepEqual(dummySP.Status.Conditions, newConditions) {
 		t.Fatalf("Failed to correctly update Status Conditions when conditions haven't changed")
@@ -86,7 +116,7 @@ func TestSecurityPolicyController_updateSecurityPolicyStatusConditions(t *testin
 		},
 	}
 
-	r.updateSecurityPolicyStatusConditions(&ctx, dummySP, newConditions)
+	r.updateSecurityPolicyStatusConditions(ctx, dummySP, newConditions)
 
 	if !reflect.DeepEqual(dummySP.Status.Conditions, newConditions) {
 		t.Fatalf("Failed to correctly update Status Conditions when conditions haven't changed")
@@ -102,7 +132,7 @@ func TestSecurityPolicyController_updateSecurityPolicyStatusConditions(t *testin
 		},
 	}
 
-	r.updateSecurityPolicyStatusConditions(&ctx, dummySP, newConditions)
+	r.updateSecurityPolicyStatusConditions(ctx, dummySP, newConditions)
 
 	if !reflect.DeepEqual(dummySP.Status.Conditions, newConditions) {
 		t.Fatalf("Failed to correctly update Status Conditions when conditions haven't changed")
@@ -118,7 +148,7 @@ func TestSecurityPolicyController_updateSecurityPolicyStatusConditions(t *testin
 		},
 	}
 
-	r.updateSecurityPolicyStatusConditions(&ctx, dummySP, newConditions)
+	r.updateSecurityPolicyStatusConditions(ctx, dummySP, newConditions)
 
 	if !reflect.DeepEqual(dummySP.Status.Conditions, newConditions) {
 		t.Fatalf("Failed to correctly update Status Conditions when conditions haven't changed")
@@ -143,6 +173,9 @@ func TestSecurityPolicyReconciler_Reconcile(t *testing.T) {
 		Service: common.Service{
 			NSXClient: &nsx.Client{},
 			NSXConfig: &config.NSXOperatorConfig{
+				CoeConfig: &config.CoeConfig{
+					EnableVPCNetwork: false,
+				},
 				NsxConfig: &config.NsxConfig{
 					EnforcementPoint: "vmc-enforcementpoint",
 				},
@@ -161,8 +194,13 @@ func TestSecurityPolicyReconciler_Reconcile(t *testing.T) {
 	// not found
 	errNotFound := errors.New("not found")
 	k8sClient.EXPECT().Get(ctx, gomock.Any(), gomock.Any()).Return(errNotFound)
-	_, err := r.Reconcile(ctx, req)
+	deleteSecurityPolicyByNamePatch := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r), "deleteSecurityPolicyByName", func(_ *SecurityPolicyReconciler, name, ns string) error {
+		return nil
+	})
+	defer deleteSecurityPolicyByNamePatch.Reset()
+	result, err := r.Reconcile(ctx, req)
 	assert.Equal(t, err, errNotFound)
+	assert.Equal(t, ResultRequeue, result)
 
 	// NSX version check failed case
 	sp := &v1alpha1.SecurityPolicy{}
@@ -170,10 +208,10 @@ func TestSecurityPolicyReconciler_Reconcile(t *testing.T) {
 		return false
 	})
 	k8sClient.EXPECT().Get(ctx, gomock.Any(), sp).Return(nil)
-	patches := gomonkey.ApplyFunc(updateFail,
-		func(r *SecurityPolicyReconciler, c *context.Context, o *v1alpha1.SecurityPolicy, e *error) {
+	updateFailPatch := gomonkey.ApplyFunc(updateFail,
+		func(r *SecurityPolicyReconciler, c context.Context, o *v1alpha1.SecurityPolicy, e *error) {
 		})
-	defer patches.Reset()
+	defer updateFailPatch.Reset()
 	result, ret := r.Reconcile(ctx, req)
 	resultRequeueAfter5mins := controllerruntime.Result{Requeue: true, RequeueAfter: 5 * time.Minute}
 	assert.Equal(t, nil, ret)
@@ -185,42 +223,74 @@ func TestSecurityPolicyReconciler_Reconcile(t *testing.T) {
 	})
 	defer checkNsxVersionPatch.Reset()
 
-	// DeletionTimestamp.IsZero = ture, client update failed
+	// DeletionTimestamp.IsZero = ture, create security policy in SystemNamespace
 	k8sClient.EXPECT().Get(ctx, gomock.Any(), sp).Return(nil)
-	err = errors.New("Update failed")
-	k8sClient.EXPECT().Update(ctx, gomock.Any(), gomock.Any()).Return(err)
-	_, ret = r.Reconcile(ctx, req)
-	assert.Equal(t, err, ret)
+	err = errors.New("fetch namespace associated with security policy CR failed")
+	IsSystemNamespacePatch := gomonkey.ApplyFunc(util.IsSystemNamespace, func(client client.Client, ns string, obj *v1.Namespace,
+	) (bool, error) {
+		return true, errors.New("fetch namespace associated with security policy CR failed")
+	})
 
-	//  DeletionTimestamp.IsZero = false, Finalizers doesn't include util.SecurityPolicyFinalizerName
+	result, ret = r.Reconcile(ctx, req)
+	IsSystemNamespacePatch.Reset()
+	assert.Equal(t, err, ret)
+	assert.Equal(t, ResultRequeue, result)
+
+	// DeletionTimestamp.IsZero = false, Finalizers include util.SecurityPolicyFinalizerName and update fails
 	k8sClient.EXPECT().Get(ctx, gomock.Any(), sp).Return(nil).Do(func(_ context.Context, _ client.ObjectKey, obj client.Object, option ...client.GetOption) error {
 		v1sp := obj.(*v1alpha1.SecurityPolicy)
 		time := metav1.Now()
 		v1sp.ObjectMeta.DeletionTimestamp = &time
+		v1sp.Finalizers = []string{common.T1SecurityPolicyFinalizerName}
 		return nil
 	})
-	patch := gomonkey.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isVpcCleanup bool) error {
+
+	patch := gomonkey.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isGc bool, isVPCCleanup bool) error {
 		assert.FailNow(t, "should not be called")
 		return nil
 	})
-	k8sClient.EXPECT().Update(ctx, gomock.Any(), gomock.Any()).Return(nil)
-	_, ret = r.Reconcile(ctx, req)
-	assert.Equal(t, ret, nil)
+
+	err = errors.New("finalizer remove failed, would retry exponentially")
+	k8sClient.EXPECT().Update(ctx, gomock.Any()).Return(err)
+	deleteFailPatch := gomonkey.ApplyFunc(deleteFail,
+		func(r *SecurityPolicyReconciler, c context.Context, o *v1alpha1.SecurityPolicy, e *error) {
+		})
+	defer deleteFailPatch.Reset()
+	result, ret = r.Reconcile(ctx, req)
+	assert.Equal(t, ret, err)
+	assert.Equal(t, ResultRequeue, result)
 	patch.Reset()
 
-	//  DeletionTimestamp.IsZero = false, Finalizers include util.SecurityPolicyFinalizerName
+	// DeletionTimestamp.IsZero = false, Finalizers doesn't include util.SecurityPolicyFinalizerName
 	k8sClient.EXPECT().Get(ctx, gomock.Any(), sp).Return(nil).Do(func(_ context.Context, _ client.ObjectKey, obj client.Object, option ...client.GetOption) error {
 		v1sp := obj.(*v1alpha1.SecurityPolicy)
 		time := metav1.Now()
 		v1sp.ObjectMeta.DeletionTimestamp = &time
-		v1sp.Finalizers = []string{common.SecurityPolicyFinalizerName}
 		return nil
 	})
-	patch = gomonkey.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isVpcCleanup bool) error {
+	patch = gomonkey.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isGc bool, isVPCCleanup bool) error {
 		return nil
 	})
-	_, ret = r.Reconcile(ctx, req)
+	result, ret = r.Reconcile(ctx, req)
 	assert.Equal(t, ret, nil)
+	assert.Equal(t, ResultNormal, result)
+	patch.Reset()
+
+	// DeletionTimestamp.IsZero = false, Finalizers include util.SecurityPolicyFinalizerName
+	k8sClient.EXPECT().Get(ctx, gomock.Any(), sp).Return(nil).Do(func(_ context.Context, _ client.ObjectKey, obj client.Object, option ...client.GetOption) error {
+		v1sp := obj.(*v1alpha1.SecurityPolicy)
+		time := metav1.Now()
+		v1sp.ObjectMeta.DeletionTimestamp = &time
+		v1sp.Finalizers = []string{common.T1SecurityPolicyFinalizerName}
+		return nil
+	})
+	patch = gomonkey.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isGc bool, isVPCCleanup bool) error {
+		return nil
+	})
+	k8sClient.EXPECT().Update(ctx, gomock.Any(), gomock.Any()).Return(nil)
+	result, ret = r.Reconcile(ctx, req)
+	assert.Equal(t, ret, nil)
+	assert.Equal(t, ResultNormal, result)
 	patch.Reset()
 }
 
@@ -232,6 +302,9 @@ func TestSecurityPolicyReconciler_GarbageCollector(t *testing.T) {
 				NsxConfig: &config.NsxConfig{
 					EnforcementPoint: "vmc-enforcementpoint",
 				},
+				CoeConfig: &config.CoeConfig{
+					EnableVPCNetwork: false,
+				},
 			},
 		},
 	}
@@ -241,10 +314,9 @@ func TestSecurityPolicyReconciler_GarbageCollector(t *testing.T) {
 		a.Insert("2345")
 		return a
 	})
-	patch.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isVpcCleanup bool) error {
+	patch.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isGc bool, isVPCCleanup bool) error {
 		return nil
 	})
-	cancel := make(chan bool)
 	defer patch.Reset()
 	mockCtl := gomock.NewController(t)
 	k8sClient := mock_client.NewMockClient(mockCtl)
@@ -263,11 +335,7 @@ func TestSecurityPolicyReconciler_GarbageCollector(t *testing.T) {
 		a.Items[0].UID = "1234"
 		return nil
 	})
-	go func() {
-		time.Sleep(1 * time.Second)
-		cancel <- true
-	}()
-	r.GarbageCollector(cancel, time.Second)
+	r.CollectGarbage(ctx)
 
 	// local store has same item as k8s cache
 	patch.Reset()
@@ -276,7 +344,7 @@ func TestSecurityPolicyReconciler_GarbageCollector(t *testing.T) {
 		a.Insert("1234")
 		return a
 	})
-	patch.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isVpcCleanup bool) error {
+	patch.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isVPCCleanupOrGC bool) error {
 		assert.FailNow(t, "should not be called")
 		return nil
 	})
@@ -287,11 +355,7 @@ func TestSecurityPolicyReconciler_GarbageCollector(t *testing.T) {
 		a.Items[0].UID = "1234"
 		return nil
 	})
-	go func() {
-		time.Sleep(1 * time.Second)
-		cancel <- true
-	}()
-	r.GarbageCollector(cancel, time.Second)
+	r.CollectGarbage(ctx)
 
 	// local store has no item
 	patch.Reset()
@@ -299,22 +363,29 @@ func TestSecurityPolicyReconciler_GarbageCollector(t *testing.T) {
 		a := sets.New[string]()
 		return a
 	})
-	patch.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isVpcCleanup bool) error {
+	patch.ApplyMethod(reflect.TypeOf(service), "DeleteSecurityPolicy", func(_ *securitypolicy.SecurityPolicyService, UID interface{}, isGc bool, isVPCCleanup bool) error {
 		assert.FailNow(t, "should not be called")
 		return nil
 	})
 	k8sClient.EXPECT().List(ctx, policyList).Return(nil).Times(0)
-	go func() {
-		time.Sleep(1 * time.Second)
-		cancel <- true
-	}()
-	r.GarbageCollector(cancel, time.Second)
+	r.CollectGarbage(ctx)
 }
 
 func TestSecurityPolicyReconciler_Start(t *testing.T) {
 	mockCtl := gomock.NewController(t)
 	k8sClient := mock_client.NewMockClient(mockCtl)
-	service := &securitypolicy.SecurityPolicyService{}
+	service := &securitypolicy.SecurityPolicyService{
+		Service: common.Service{
+			NSXConfig: &config.NSXOperatorConfig{
+				NsxConfig: &config.NsxConfig{
+					EnforcementPoint: "vmc-enforcementpoint",
+				},
+				CoeConfig: &config.CoeConfig{
+					EnableVPCNetwork: false,
+				},
+			},
+		},
+	}
 	mgr, _ := controllerruntime.NewManager(&rest.Config{}, manager.Options{})
 	r := &SecurityPolicyReconciler{
 		Client:  k8sClient,
@@ -392,6 +463,7 @@ func TestReconcileSecurityPolicy(t *testing.T) {
 		return nil
 	})
 
+	r := NewFakeSecurityPolicyReconciler()
 	mockQueue := mock_client.NewMockInterface(mockCtl)
 
 	type args struct {
@@ -408,7 +480,7 @@ func TestReconcileSecurityPolicy(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.wantErr(t, reconcileSecurityPolicy(tt.args.client, tt.args.pods, tt.args.q),
+			tt.wantErr(t, reconcileSecurityPolicy(r, tt.args.client, tt.args.pods, tt.args.q),
 				fmt.Sprintf("reconcileSecurityPolicy(%v, %v, %v)", tt.args.client, tt.args.pods, tt.args.q))
 		})
 	}

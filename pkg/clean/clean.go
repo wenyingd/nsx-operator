@@ -13,7 +13,7 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
-	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/ippool"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/ipaddressallocation"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/securitypolicy"
 	sr "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/staticroute"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnet"
@@ -55,6 +55,7 @@ func Clean(ctx context.Context, cf *config.NSXOperatorConfig, log *logr.Logger, 
 	if err := cf.ValidateConfigFromCmd(); err != nil {
 		return errors.Join(nsxutil.ValidationFailed, err)
 	}
+	cf.LibMode = true
 	nsxClient := nsx.GetClient(cf)
 	if nsxClient == nil {
 		return nsxutil.GetNSXClientFailed
@@ -145,12 +146,6 @@ func InitializeCleanupService(cf *config.NSXOperatorConfig, nsxClient *nsx.Clien
 			return securitypolicy.InitializeSecurityPolicy(service, vpcService)
 		}
 	}
-	wrapInitializeIPPool := func(service common.Service) cleanupFunc {
-		return func() (cleanup, error) {
-			return ippool.InitializeIPPool(service, vpcService)
-		}
-	}
-
 	wrapInitializeVPC := func(service common.Service) cleanupFunc {
 		return func() (cleanup, error) {
 			return vpcService, vpcErr
@@ -168,14 +163,19 @@ func InitializeCleanupService(cf *config.NSXOperatorConfig, nsxClient *nsx.Clien
 			return subnetport.InitializeSubnetPort(service)
 		}
 	}
+	wrapInitializeIPAddressAllocation := func(service common.Service) cleanupFunc {
+		return func() (cleanup, error) {
+			return ipaddressallocation.InitializeIPAddressAllocation(service, vpcService, true)
+		}
+	}
 	// TODO: initialize other CR services
 	cleanupService = cleanupService.
 		AddCleanupService(wrapInitializeSubnetPort(commonService)).
 		AddCleanupService(wrapInitializeSubnetService(commonService)).
 		AddCleanupService(wrapInitializeSecurityPolicy(commonService)).
-		AddCleanupService(wrapInitializeIPPool(commonService)).
 		AddCleanupService(wrapInitializeStaticRoute(commonService)).
-		AddCleanupService(wrapInitializeVPC(commonService))
+		AddCleanupService(wrapInitializeVPC(commonService)).
+		AddCleanupService(wrapInitializeIPAddressAllocation(commonService))
 
 	return cleanupService, nil
 }

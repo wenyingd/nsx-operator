@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/legacy/v1alpha1"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	nsxutil "github.com/vmware-tanzu/nsx-operator/pkg/nsx/util"
 	"github.com/vmware-tanzu/nsx-operator/pkg/util"
@@ -28,17 +28,18 @@ func (service *SecurityPolicyService) expandRule(obj *v1alpha1.SecurityPolicy, r
 	var nsxGroups []*model.Group
 
 	if len(rule.Ports) == 0 {
-		nsxRule, err := service.buildRuleBasicInfo(obj, rule, ruleIdx, 0, 0, -1, false, createdFor)
+		nsxRule, err := service.buildRuleBasicInfo(obj, rule, ruleIdx, 0, 0, false, -1, createdFor)
 		if err != nil {
 			return nil, nil, err
 		}
 		nsxRules = append(nsxRules, nsxRule)
+		return nsxGroups, nsxRules, nil
 	}
 
 	// Check if there is a namedport in the rule
 	hasNamedPort := service.hasNamedPort(rule)
 	if !hasNamedPort {
-		nsxRule, err := service.buildRuleBasicInfo(obj, rule, ruleIdx, 0, 0, -1, false, createdFor)
+		nsxRule, err := service.buildRuleBasicInfo(obj, rule, ruleIdx, 0, 0, false, -1, createdFor)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -49,7 +50,6 @@ func (service *SecurityPolicyService) expandRule(obj *v1alpha1.SecurityPolicy, r
 			ruleServiceEntries = append(ruleServiceEntries, serviceEntry)
 		}
 		nsxRule.ServiceEntries = ruleServiceEntries
-
 		nsxRules = append(nsxRules, nsxRule)
 	}
 
@@ -86,13 +86,13 @@ func (service *SecurityPolicyService) expandRuleByPort(obj *v1alpha1.SecurityPol
 		}
 		startPort, err = service.resolveNamedPort(obj, rule, port)
 		if err != nil {
-			// In case there is no more valid ip set selected, so clear the stale ip set group in nsx if stale ips exist
+			// In case there is no more valid ip set selected, so clear the stale ip set group in NSX if stale ips exist
 			if errors.As(err, &nsxutil.NoEffectiveOption{}) {
-				groups := service.groupStore.GetByIndex(common.TagScopeRuleID, service.buildRuleID(obj, rule, ruleIdx, createdFor))
+				groups := service.groupStore.GetByIndex(common.TagScopeRuleID, service.buildRuleID(obj, ruleIdx, createdFor))
 				var ipSetGroup *model.Group
 				for _, group := range groups {
 					ipSetGroup = group
-					// Clear ip set group in nsx
+					// Clear ip set group in NSX
 					ipSetGroup.Expression = nil
 					log.V(1).Info("clear ruleIPSetGroup", "ruleIPSetGroup", ipSetGroup)
 					err3 := service.createOrUpdateGroups(obj, []*model.Group{ipSetGroup})
@@ -121,7 +121,7 @@ func (service *SecurityPolicyService) expandRuleByService(obj *v1alpha1.Security
 ) ([]*model.Group, *model.Rule, error) {
 	var nsxGroups []*model.Group
 
-	nsxRule, err := service.buildRuleBasicInfo(obj, rule, ruleIdx, portIdx, portAddressIdx, portAddress.Port, true, createdFor)
+	nsxRule, err := service.buildRuleBasicInfo(obj, rule, ruleIdx, portIdx, portAddressIdx, true, portAddress.Port, createdFor)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -136,7 +136,7 @@ func (service *SecurityPolicyService) expandRuleByService(obj *v1alpha1.Security
 		ruleIPSetGroup := service.buildRuleIPSetGroup(obj, rule, nsxRule, portAddress.IPs, ruleIdx, createdFor)
 
 		// In VPC network, NSGroup with IPAddressExpression type can be supported in VPC level as well.
-		IPSetGroupPath, err := service.buildRuleIPSetGroupPath(obj, nsxRule, false)
+		IPSetGroupPath, err := service.buildRuleIPSetGroupPath(obj, nsxRule)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -216,22 +216,18 @@ func (service *SecurityPolicyService) buildRuleIPSetGroupName(ruleModel *model.R
 	return util.GenerateTruncName(common.MaxNameLength, *ruleModel.DisplayName, "", common.IpSetGroupSuffix, "", "")
 }
 
-func (service *SecurityPolicyService) buildRuleIPSetGroupPath(obj *v1alpha1.SecurityPolicy, ruleModel *model.Rule, groupShared bool) (string, error) {
+func (service *SecurityPolicyService) buildRuleIPSetGroupPath(obj *v1alpha1.SecurityPolicy, ruleModel *model.Rule) (string, error) {
 	ipSetGroupID := service.buildRuleIPSetGroupID(ruleModel)
 
-	if isVpcEnabled(service) {
-		vpcInfo, err := service.getVpcInfo(obj.ObjectMeta.Namespace)
+	if IsVPCEnabled(service) {
+		vpcInfo, err := service.getVPCInfo(obj.ObjectMeta.Namespace)
 		if err != nil {
 			return "", err
 		}
-		orgId := (*vpcInfo).OrgID
-		projectId := (*vpcInfo).ProjectID
-		vpcId := (*vpcInfo).VPCID
-
-		if groupShared {
-			return fmt.Sprintf("/orgs/%s/projects/%s/infra/domains/%s/groups/%s", orgId, projectId, getVpcProjectDomain(), ipSetGroupID), nil
-		}
-		return fmt.Sprintf("/orgs/%s/projects/%s/vpcs/%s/groups/%s", orgId, projectId, vpcId, ipSetGroupID), nil
+		orgID := (*vpcInfo).OrgID
+		projectID := (*vpcInfo).ProjectID
+		vpcID := (*vpcInfo).VPCID
+		return fmt.Sprintf("/orgs/%s/projects/%s/vpcs/%s/groups/%s", orgID, projectID, vpcID, ipSetGroupID), nil
 	}
 
 	return fmt.Sprintf("/infra/domains/%s/groups/%s", getDomain(service), ipSetGroupID), nil
@@ -249,7 +245,7 @@ func (service *SecurityPolicyService) buildRuleIPSetGroup(obj *v1alpha1.Security
 	ipSetGroup.DisplayName = &ipSetGroupName
 
 	// IPSetGroup is always destination group for named port
-	peerTags := service.buildPeerTags(obj, rule, ruleIdx, false, false, createdFor)
+	peerTags := service.buildPeerTags(obj, rule, ruleIdx, false, false, false, createdFor)
 	ipSetGroup.Tags = peerTags
 
 	addresses := data.NewListValue()

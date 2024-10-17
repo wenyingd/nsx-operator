@@ -21,13 +21,16 @@ const (
 	MaxIdLength                        int    = 255
 	MaxNameLength                      int    = 255
 	MaxSubnetNameLength                int    = 80
+	VPCLbResourcePathMinSegments       int    = 8
 	PriorityNetworkPolicyAllowRule     int    = 2010
 	PriorityNetworkPolicyIsolationRule int    = 2090
 	TagScopeNCPCluster                 string = "ncp/cluster"
 	TagScopeNCPProjectUID              string = "ncp/project_uid"
+	TagScopeNCPCreateFor               string = "ncp/created_for"
 	TagScopeNCPVIFProjectUID           string = "ncp/vif_project_uid"
 	TagScopeNCPPod                     string = "ncp/pod"
 	TagScopeNCPVNETInterface           string = "ncp/vnet_interface"
+	TagScopeCreatedFor                 string = "nsx-op/created_for"
 	TagScopeVersion                    string = "nsx-op/version"
 	TagScopeCluster                    string = "nsx-op/cluster"
 	TagScopeNamespace                  string = "nsx-op/namespace"
@@ -47,23 +50,28 @@ const (
 	TagScopeNSXServiceAccountCRName    string = "nsx-op/nsx_service_account_name"
 	TagScopeNSXServiceAccountCRUID     string = "nsx-op/nsx_service_account_uid"
 	TagScopeNSXProjectID               string = "nsx-op/nsx_project_id"
-	TagScopeProjectGroupShared         string = "nsx-op/is_nsx_project_shared"
+	TagScopeNSXShareCreatedFor         string = "nsx-op/nsx_share_created_for"
 	TagScopeSubnetPortCRName           string = "nsx-op/subnetport_name"
 	TagScopeSubnetPortCRUID            string = "nsx-op/subnetport_uid"
 	TagScopeIPPoolCRName               string = "nsx-op/ippool_name"
 	TagScopeIPPoolCRUID                string = "nsx-op/ippool_uid"
 	TagScopeIPPoolCRType               string = "nsx-op/ippool_type"
+	TagScopeIPAddressAllocationCRName  string = "nsx-op/ipaddressallocation_name"
+	TagScopeIPAddressAllocationCRUID   string = "nsx-op/ipaddressallocation_uid"
 	TagScopeIPSubnetName               string = "nsx-op/ipsubnet_name"
 	TagScopeVMNamespaceUID             string = "nsx-op/vm_namespace_uid"
 	TagScopeVMNamespace                string = "nsx-op/vm_namespace"
+	TagScopeVPCManagedBy               string = "nsx/managed-by"
+	AutoCreatedVPCTagValue             string = "nsx-op"
 	LabelDefaultSubnetSet              string = "nsxoperator.vmware.com/default-subnetset-for"
 	LabelDefaultVMSubnetSet            string = "VirtualMachine"
 	LabelDefaultPodSubnetSet           string = "Pod"
-	LabelLbIngressIpMode               string = "tanzu.vmware.com/ingress-ip-mode"
+	LabelLbIngressIpMode               string = "nsx.vmware.com/ingress-ip-mode"
 	LabelLbIngressIpModeVipValue       string = "vip"
 	LabelLbIngressIpModeProxyValue     string = "proxy"
 	DefaultPodSubnetSet                string = "pod-default"
 	DefaultVMSubnetSet                 string = "vm-default"
+	SystemVPCNetworkConfigurationName  string = "system"
 	TagScopeSubnetCRUID                string = "nsx-op/subnet_uid"
 	TagScopeSubnetCRName               string = "nsx-op/subnet_name"
 	TagScopeSubnetSetCRName            string = "nsx-op/subnetset_name"
@@ -71,56 +79,53 @@ const (
 	TagValueGroupScope                 string = "scope"
 	TagValueGroupSource                string = "source"
 	TagValueGroupDestination           string = "destination"
-	TagValueGroupAvi                   string = "avi"
+	TagValueShareCreatedForInfra       string = "infra"
+	TagValueShareCreatedForProject     string = "project"
+	TagValueShareNotCreated            string = "notShared"
+	TagValueSLB                        string = "SLB"
 	AnnotationVPCNetworkConfig         string = "nsx.vmware.com/vpc_network_config"
 	AnnotationSharedVPCNamespace       string = "nsx.vmware.com/shared_vpc_namespace"
 	AnnotationDefaultNetworkConfig     string = "nsx.vmware.com/default"
 	AnnotationAttachmentRef            string = "nsx.vmware.com/attachment_ref"
-	AnnotationPodMAC                   string = "nsx.vmware.com/mac"
-	AnnotationPodAttachment            string = "nsx.vmware.com/attachment"
 	TagScopePodName                    string = "nsx-op/pod_name"
 	TagScopePodUID                     string = "nsx-op/pod_uid"
 	ValueMajorVersion                  string = "1"
 	ValueMinorVersion                  string = "0"
 	ValuePatchVersion                  string = "0"
+	ConnectorUnderline                 string = "_"
 
-	GCInterval          = 60 * time.Second
-	RealizeTimeout      = 2 * time.Minute
-	RealizeMaxRetries   = 3
-	IPPoolFinalizerName = "ippool.nsx.vmware.com/finalizer"
-	DefaultSNATID       = "DEFAULT"
-	AVISubnetLBID       = "_AVI_SUBNET--LB"
-	IPPoolTypePublic    = "Public"
-	IPPoolTypePrivate   = "Private"
+	GCInterval        = 60 * time.Second
+	RealizeTimeout    = 2 * time.Minute
+	RealizeMaxRetries = 3
+	DefaultSNATID     = "DEFAULT"
+	AVISubnetLBID     = "_services"
+	IPPoolTypePublic  = "Public"
+	IPPoolTypePrivate = "Private"
 
-	SecurityPolicyFinalizerName    = "securitypolicy.nsx.vmware.com/finalizer"
-	NetworkPolicyFinalizerName     = "networkpolicy.nsx.vmware.com/finalizer"
-	StaticRouteFinalizerName       = "staticroute.nsx.vmware.com/finalizer"
-	NSXServiceAccountFinalizerName = "nsxserviceaccount.nsx.vmware.com/finalizer"
-	SubnetFinalizerName            = "subnet.nsx.vmware.com/finalizer"
-	SubnetSetFinalizerName         = "subnetset.nsx.vmware.com/finalizer"
-	SubnetPortFinalizerName        = "subnetport.nsx.vmware.com/finalizer"
-	NetworkInfoFinalizerName       = "networkinfo.nsx.vmware.com/finalizer"
-	PodFinalizerName               = "pod.nsx.vmware.com/finalizer"
+	NSXServiceAccountFinalizerName   = "nsxserviceaccount.nsx.vmware.com/finalizer"
+	T1SecurityPolicyFinalizerName    = "securitypolicy.nsx.vmware.com/finalizer"
+	IPPoolFinalizerName              = "ippool.crd.nsx.vmware.com/finalizer"
+	IPAddressAllocationFinalizerName = "ipaddressallocation.crd.nsx.vmware.com/finalizer"
 
 	IndexKeySubnetID            = "IndexKeySubnetID"
 	IndexKeyPathPath            = "Path"
 	IndexKeyNodeName            = "IndexKeyNodeName"
 	GCValidationInterval uint16 = 720
 
-	RuleSuffixIngressAllow  = "ingress-allow"
-	RuleSuffixEgressAllow   = "egress-allow"
-	RuleSuffixIngressDrop   = "ingress-isolation"
-	RuleSuffixEgressDrop    = "egress-isolation"
-	RuleSuffixIngressReject = "ingress-reject"
-	RuleSuffixEgressReject  = "egress-reject"
-	SecurityPolicyPrefix    = "sp"
-	NetworkPolicyPrefix     = "np"
-	TargetGroupSuffix       = "scope"
-	SrcGroupSuffix          = "src"
-	DstGroupSuffix          = "dst"
-	IpSetGroupSuffix        = "ipset"
-	SharePrefix             = "share"
+	RuleIngress          = "ingress"
+	RuleEgress           = "egress"
+	RuleActionAllow      = "allow"
+	RuleActionDrop       = "isolation"
+	RuleActionReject     = "reject"
+	RuleAnyPorts         = "all"
+	DefaultProject       = "default"
+	SecurityPolicyPrefix = "sp"
+	NetworkPolicyPrefix  = "np"
+	TargetGroupSuffix    = "scope"
+	SrcGroupSuffix       = "src"
+	DstGroupSuffix       = "dst"
+	IpSetGroupSuffix     = "ipset"
+	ShareSuffix          = "share"
 )
 
 var (
@@ -130,37 +135,56 @@ var (
 )
 
 var (
-	ResourceType                       = "resource_type"
-	ResourceTypeInfra                  = "Infra"
-	ResourceTypeDomain                 = "Domain"
-	ResourceTypeSecurityPolicy         = "SecurityPolicy"
-	ResourceTypeNetworkPolicy          = "NetworkPolicy"
-	ResourceTypeGroup                  = "Group"
-	ResourceTypeRule                   = "Rule"
-	ResourceTypeIPBlock                = "IpAddressBlock"
-	ResourceTypeOrgRoot                = "OrgRoot"
-	ResourceTypeOrg                    = "Org"
-	ResourceTypeProject                = "Project"
-	ResourceTypeVpc                    = "Vpc"
-	ResourceTypeSubnetPort             = "VpcSubnetPort"
-	ResourceTypeVirtualMachine         = "VirtualMachine"
-	ResourceTypeShare                  = "Share"
-	ResourceTypeSharedResource         = "SharedResource"
-	ResourceTypeChildSharedResource    = "ChildSharedResource"
-	ResourceTypeChildShare             = "ChildShare"
-	ResourceTypeChildRule              = "ChildRule"
-	ResourceTypeChildGroup             = "ChildGroup"
-	ResourceTypeChildSecurityPolicy    = "ChildSecurityPolicy"
-	ResourceTypeChildResourceReference = "ChildResourceReference"
+	ResourceType                             = "resource_type"
+	ResourceTypeInfra                        = "Infra"
+	ResourceTypeDomain                       = "Domain"
+	ResourceTypeSecurityPolicy               = "SecurityPolicy"
+	ResourceTypeNetworkPolicy                = "NetworkPolicy"
+	ResourceTypeGroup                        = "Group"
+	ResourceTypeRule                         = "Rule"
+	ResourceTypeIPBlock                      = "IpAddressBlock"
+	ResourceTypeOrgRoot                      = "OrgRoot"
+	ResourceTypeOrg                          = "Org"
+	ResourceTypeProject                      = "Project"
+	ResourceTypeVpc                          = "Vpc"
+	ResourceTypeVpcConnectivityProfile       = "VpcConnectivityProfile"
+	ResourceTypeSubnetPort                   = "VpcSubnetPort"
+	ResourceTypeVirtualMachine               = "VirtualMachine"
+	ResourceTypeLBService                    = "LBService"
+	ResourceTypeShare                        = "Share"
+	ResourceTypeSharedResource               = "SharedResource"
+	ResourceTypeChildSharedResource          = "ChildSharedResource"
+	ResourceTypeChildShare                   = "ChildShare"
+	ResourceTypeChildRule                    = "ChildRule"
+	ResourceTypeChildGroup                   = "ChildGroup"
+	ResourceTypeChildSecurityPolicy          = "ChildSecurityPolicy"
+	ResourceTypeChildResourceReference       = "ChildResourceReference"
+	ResourceTypeTlsCertificate               = "TlsCertificate"
+	ResourceTypeLBHttpProfile                = "LBHttpProfile"
+	ResourceTypeLBFastTcpProfile             = "LBFastTcpProfile"
+	ResourceTypeLBFastUdpProfile             = "LBFastUdpProfile"
+	ResourceTypeLBCookiePersistenceProfile   = "LBCookiePersistenceProfile"
+	ResourceTypeLBSourceIpPersistenceProfile = "LBSourceIpPersistenceProfile"
+	ResourceTypeLBHttpMonitorProfile         = "LBHttpMonitorProfile"
+	ResourceTypeLBTcpMonitorProfile          = "LBTcpMonitorProfile"
+	ResourceTypeLBVirtualServer              = "LBVirtualServer"
+	ResourceTypeLBPool                       = "LBPool"
 
 	// ResourceTypeClusterControlPlane is used by NSXServiceAccountController
 	ResourceTypeClusterControlPlane = "clustercontrolplane"
 	// ResourceTypePrincipalIdentity is used by NSXServiceAccountController, and it is MP resource type.
-	ResourceTypePrincipalIdentity = "principalidentity"
-	ResourceTypeSubnet            = "VpcSubnet"
-	ResourceTypeIPPool            = "IpAddressPool"
-	ResourceTypeIPPoolBlockSubnet = "IpAddressPoolBlockSubnet"
-	ResourceTypeNode              = "HostTransportNode"
+	ResourceTypePrincipalIdentity   = "principalidentity"
+	ResourceTypeSubnet              = "VpcSubnet"
+	ResourceTypeIPPool              = "IpAddressPool"
+	ResourceTypeIPAddressAllocation = "VpcIpAddressAllocation"
+	ResourceTypeIPPoolBlockSubnet   = "IpAddressPoolBlockSubnet"
+	ResourceTypeNode                = "HostTransportNode"
+
+	// Reasons for verification of gateway connection in day0
+	ReasonEdgeMissingInProject                       = "EdgeMissingInProject"
+	ReasonDistributedGatewayConnectionNotSupported   = "DistributedGatewayConnectionNotSupported"
+	ReasonGatewayConnectionNotSet                    = "GatewayConnectionNotSet"
+	ReasonNoExternalIPBlocksInVPCConnectivityProfile = "ExternalIPBlockMissingInProfile"
 )
 
 type Service struct {
@@ -188,22 +212,18 @@ type VPCResourceInfo struct {
 	//    ID=port1, ParentID=s1;
 	// 2. For the subnet with path /orgs/o1/projects/p1/vpcs/v1/subnets/s1,
 	//    ID=s1, ParentID=v1 (ParentID==VPCID).
-	ID                 string
-	ParentID           string
-	PrivateIpv4Blocks  []string
-	ExternalIPv4Blocks []string
+	ID                string
+	ParentID          string
+	PrivateIpv4Blocks []string
 }
 
 type VPCNetworkConfigInfo struct {
-	IsDefault               bool
-	Org                     string
-	Name                    string
-	DefaultGatewayPath      string
-	EdgeClusterPath         string
-	NsxtProject             string
-	ExternalIPv4Blocks      []string
-	PrivateIPv4CIDRs        []string
-	DefaultIPv4SubnetSize   int
-	DefaultSubnetAccessMode string
-	ShortID                 string
+	IsDefault              bool
+	Org                    string
+	Name                   string
+	VPCConnectivityProfile string
+	NSXProject             string
+	PrivateIPs             []string
+	DefaultSubnetSize      int
+	VPCPath                string
 }

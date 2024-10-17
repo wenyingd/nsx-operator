@@ -12,16 +12,18 @@ import (
 	"github.com/vmware/vsphere-automation-sdk-go/runtime/bindings"
 	"github.com/vmware/vsphere-automation-sdk-go/runtime/data"
 	"github.com/vmware/vsphere-automation-sdk-go/services/nsxt/model"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 	"github.com/vmware-tanzu/nsx-operator/pkg/config"
 	mocks "github.com/vmware-tanzu/nsx-operator/pkg/mock/staticrouteclient"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/ratelimiter"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/vpc"
+	"github.com/vmware-tanzu/nsx-operator/pkg/util"
 )
 
 var (
@@ -39,8 +41,7 @@ var (
 	tagScopeNamespace         = common.TagScopeNamespace
 )
 
-type fakeQueryClient struct {
-}
+type fakeQueryClient struct{}
 
 func (qIface *fakeQueryClient) List(queryParam string, cursorParam *string, includedFieldsParam *string, pageSizeParam *int64, sortAscendingParam *bool, sortByParam *string) (model.SearchResponse, error) {
 	resultCount := int64(1)
@@ -92,7 +93,8 @@ func Test_InitializeStaticRouteStore(t *testing.T) {
 	defer mockController.Finish()
 	commonService := service.Service
 	patch := gomonkey.ApplyMethod(reflect.TypeOf(&commonService), "InitializeResourceStore", func(_ *common.Service, wg *sync.WaitGroup,
-		fatalErrors chan error, resourceTypeValue string, tags []model.Tag, store common.Store) {
+		fatalErrors chan error, resourceTypeValue string, tags []model.Tag, store common.Store,
+	) {
 		wg.Done()
 		return
 	})
@@ -128,25 +130,26 @@ func TestStaticRouteService_DeleteStaticRoute(t *testing.T) {
 		t.Error(err)
 	}
 
-	id := "vpc-1"
-	sr1 := &model.StaticRoutes{Id: &id}
-
-	returnservice.StaticRouteStore.Add(sr1)
-
-	patches := gomonkey.ApplyMethod(reflect.TypeOf(returnservice.VPCService), "ListVPCInfo", func(_ common.VPCServiceProvider, ns string) []common.VPCResourceInfo {
-		id := "vpc-1"
-		return []common.VPCResourceInfo{{OrgID: "default", ProjectID: "project-1", VPCID: "vpc-1", ID: id}}
-	})
+	srObj := &v1alpha1.StaticRoute{
+		ObjectMeta: v1.ObjectMeta{
+			UID:  "uid-123",
+			Name: "sr",
+		},
+	}
+	id := util.GenerateIDByObject(srObj)
+	path := "/orgs/default/projects/project-1/vpcs/vpc-1"
+	sr1 := &model.StaticRoutes{Id: &id, Path: &path}
 
 	// no record found
 	mockStaticRouteclient.EXPECT().Delete(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Times(0)
-	err = returnservice.DeleteStaticRoute("123", "vpc1")
+	err = returnservice.DeleteStaticRoute(srObj)
 	assert.Equal(t, err, nil)
-	defer patches.Reset()
+
+	returnservice.StaticRouteStore.Add(sr1)
 
 	// delete record
 	mockStaticRouteclient.EXPECT().Delete("default", "project-1", "vpc-1", id).Return(nil).Times(1)
-	err = returnservice.DeleteStaticRoute("123", id)
+	err = returnservice.DeleteStaticRoute(srObj)
 	assert.Equal(t, err, nil)
 	srs := returnservice.StaticRouteStore.List()
 	assert.Equal(t, len(srs), 0)
@@ -171,7 +174,6 @@ func TestStaticRouteService_CreateorUpdateStaticRoute(t *testing.T) {
 
 	vpcService := &vpc.VPCService{}
 	returnservice, err := InitializeStaticRoute(service.Service, vpcService)
-
 	if err != nil {
 		t.Error(err)
 	}

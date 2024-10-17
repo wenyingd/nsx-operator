@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
-	"github.com/vmware-tanzu/nsx-operator/pkg/apis/v1alpha1"
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 	"github.com/vmware-tanzu/nsx-operator/pkg/config"
 	"github.com/vmware-tanzu/nsx-operator/pkg/controllers/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
@@ -49,25 +49,13 @@ func (r *NamespaceReconciler) getDefaultNetworkConfigName() (string, error) {
 	return nc.Name, nil
 }
 
-func (r *NamespaceReconciler) createNetworkInfoCR(ctx *context.Context, obj client.Object, ns string, ncName string) (*v1alpha1.NetworkInfo, error) {
+func (r *NamespaceReconciler) createNetworkInfoCR(ctx context.Context, obj client.Object, ns string) (*v1alpha1.NetworkInfo, error) {
 	networkInfos := &v1alpha1.NetworkInfoList{}
-	r.Client.List(*ctx, networkInfos, client.InNamespace(ns))
+	r.Client.List(ctx, networkInfos, client.InNamespace(ns))
 	if len(networkInfos.Items) > 0 {
 		// if there is already one networkInfo, return this networkInfo
 		log.Info("networkInfo already exists", "networkInfo", networkInfos.Items[0].Name, "Namespace", ns)
 		return &networkInfos.Items[0], nil
-	}
-	nc, ncExist := r.VPCService.GetVPCNetworkConfig(ncName)
-	if !ncExist {
-		message := fmt.Sprintf("missing network config %s for namespace %s", ncName, ns)
-		r.namespaceError(ctx, obj, message, nil)
-		return nil, errors.New(message)
-	}
-	if !r.VPCService.ValidateNetworkConfig(nc) {
-		// if network config is not valid, no need to retry, skip processing
-		message := fmt.Sprintf("invalid network config %s for namespace %s, missing private cidr", ncName, ns)
-		r.namespaceError(ctx, obj, message, nil)
-		return nil, errors.New(message)
 	}
 
 	// create networkInfo cr with existing vpc network config
@@ -79,7 +67,7 @@ func (r *NamespaceReconciler) createNetworkInfoCR(ctx *context.Context, obj clie
 		},
 		VPCs: []v1alpha1.VPCState{},
 	}
-	err := r.Client.Create(*ctx, networkInfoCR)
+	err := r.Client.Create(ctx, networkInfoCR)
 	if err != nil {
 		message := "failed to create NetworkInfo CR"
 		r.namespaceError(ctx, obj, message, err)
@@ -96,7 +84,7 @@ func (r *NamespaceReconciler) createNetworkInfoCR(ctx *context.Context, obj clie
 	return networkInfoCR, nil
 }
 
-func (r *NamespaceReconciler) createDefaultSubnetSet(ns string) error {
+func (r *NamespaceReconciler) createDefaultSubnetSet(ns string, defaultSubnetSize int) error {
 	defaultSubnetSets := map[string]string{
 		types.DefaultVMSubnetSet:  types.LabelDefaultVMSubnetSet,
 		types.DefaultPodSubnetSet: types.LabelDefaultPodSubnetSet,
@@ -124,14 +112,14 @@ func (r *NamespaceReconciler) createDefaultSubnetSet(ns string) error {
 						types.LabelDefaultSubnetSet: subnetSetType,
 					},
 				},
-				Spec: v1alpha1.SubnetSetSpec{
-					AdvancedConfig: v1alpha1.AdvancedConfig{
-						StaticIPAllocation: v1alpha1.StaticIPAllocation{
-							Enable: true,
-						},
-					},
-				},
+				Spec: v1alpha1.SubnetSetSpec{},
 			}
+			if name == types.DefaultVMSubnetSet {
+				obj.Spec.AccessMode = v1alpha1.AccessMode(v1alpha1.AccessModePrivate)
+			} else if name == types.DefaultPodSubnetSet {
+				obj.Spec.AccessMode = v1alpha1.AccessMode(v1alpha1.AccessModeProject)
+			}
+			obj.Spec.IPv4SubnetSize = defaultSubnetSize
 			if err := r.Client.Create(context.Background(), obj); err != nil {
 				return err
 			}
@@ -144,7 +132,7 @@ func (r *NamespaceReconciler) createDefaultSubnetSet(ns string) error {
 	return nil
 }
 
-func (r *NamespaceReconciler) namespaceError(ctx *context.Context, k8sObj client.Object, msg string, err error) {
+func (r *NamespaceReconciler) namespaceError(ctx context.Context, k8sObj client.Object, msg string, err error) {
 	logErr := util.If(err == nil, errors.New(msg), err).(error)
 	log.Error(logErr, msg)
 	changes := map[string]string{AnnotationNamespaceVPCError: msg}
@@ -216,7 +204,6 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			log.Error(err, "failed to build namespace and network config bindings", "Namepspace", ns)
 			return common.ResultRequeueAfter10sec, nil
 		}
-		// read annotation "nsx.vmware.com/shared_vpc_namespace", if ns contains this annotation, it means it will share infra VPC
 		ncName, ncExist := annotations[types.AnnotationVPCNetworkConfig]
 
 		// If ns do not have network config name tag, then use default vpc network config name
@@ -229,10 +216,23 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 		}
 
-		if _, err := r.createNetworkInfoCR(&ctx, obj, ns, ncName); err != nil {
+		nc, ncExist := r.VPCService.GetVPCNetworkConfig(ncName)
+		if !ncExist {
+			message := fmt.Sprintf("missing network config %s for namespace %s", ncName, ns)
+			r.namespaceError(ctx, obj, message, nil)
 			return common.ResultRequeueAfter10sec, nil
 		}
-		if err := r.createDefaultSubnetSet(ns); err != nil {
+		if !r.VPCService.ValidateNetworkConfig(nc) {
+			// if network config is not valid, no need to retry, skip processing
+			message := fmt.Sprintf("invalid network config %s for namespace %s, missing private cidr", ncName, ns)
+			r.namespaceError(ctx, obj, message, nil)
+			return common.ResultRequeueAfter10sec, nil
+		}
+
+		if _, err := r.createNetworkInfoCR(ctx, obj, ns); err != nil {
+			return common.ResultRequeueAfter10sec, nil
+		}
+		if err := r.createDefaultSubnetSet(ns, nc.DefaultSubnetSize); err != nil {
 			return common.ResultRequeueAfter10sec, nil
 		}
 		return common.ResultNormal, nil

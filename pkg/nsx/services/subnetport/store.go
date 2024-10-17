@@ -16,6 +16,8 @@ func keyFunc(obj interface{}) (string, error) {
 		return *v.Id, nil
 	case types.UID:
 		return string(v), nil
+	case string:
+		return v, nil
 	default:
 		return "", errors.New("keyFunc doesn't support unknown type")
 	}
@@ -62,6 +64,24 @@ func subnetPortIndexBySubnetID(obj interface{}) ([]string, error) {
 
 	default:
 		return nil, errors.New("subnetPortIndexBySubnetID doesn't support unknown type")
+	}
+}
+
+func subnetPortIndexNamespace(obj interface{}) ([]string, error) {
+	switch o := obj.(type) {
+	case *model.VpcSubnetPort:
+		return filterTag(o.Tags, common.TagScopeVMNamespace), nil
+	default:
+		return nil, errors.New("subnetPortIndexNamespace doesn't support unknown type")
+	}
+}
+
+func subnetPortIndexPodNamespace(obj interface{}) ([]string, error) {
+	switch o := obj.(type) {
+	case *model.VpcSubnetPort:
+		return filterTag(o.Tags, common.TagScopeNamespace), nil
+	default:
+		return nil, errors.New("subnetPortIndexPodNamespace doesn't support unknown type")
 	}
 }
 
