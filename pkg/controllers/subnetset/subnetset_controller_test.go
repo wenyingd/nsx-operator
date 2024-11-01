@@ -34,6 +34,7 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnet"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnetbinding"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnetport"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/vpc"
 )
@@ -108,7 +109,12 @@ func TestReconcile(t *testing.T) {
 			name:         "Create a SubnetSet with find VPCNetworkConfig error",
 			expectRes:    ResultRequeue,
 			expectErrStr: "failed to find VPCNetworkConfig for Namespace",
-			patches:      nil,
+			patches: func(r *SubnetSetReconciler) *gomonkey.Patches {
+				patches := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r), "subnetSetHasBindings", func(_ *SubnetSetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
+				})
+				return patches
+			},
 		},
 		{
 			// TODO: should check the SubnetSet status has error message, which contains 'ipv4SubnetSize has invalid size'
@@ -119,6 +125,9 @@ func TestReconcile(t *testing.T) {
 				vpcnetworkInfo := &common.VPCNetworkConfigInfo{DefaultSubnetSize: 15}
 				patches := gomonkey.ApplyMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return vpcnetworkInfo
+				})
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetSetHasBindings", func(_ *SubnetSetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 				return patches
 			},
@@ -141,6 +150,9 @@ func TestReconcile(t *testing.T) {
 						&vpcSubnet,
 					}
 				})
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetSetHasBindings", func(_ *SubnetSetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
+				})
 				return patches
 			},
 		},
@@ -153,6 +165,10 @@ func TestReconcile(t *testing.T) {
 				vpcnetworkInfo := &common.VPCNetworkConfigInfo{DefaultSubnetSize: 32}
 				patches := gomonkey.ApplyMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return vpcnetworkInfo
+				})
+
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetSetHasBindings", func(_ *SubnetSetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 
 				tags := []model.Tag{{Scope: common.String(common.TagScopeVMNamespace), Tag: common.String(ns)}}
@@ -179,6 +195,9 @@ func TestReconcile(t *testing.T) {
 				vpcnetworkInfo := &common.VPCNetworkConfigInfo{DefaultSubnetSize: 32}
 				patches := gomonkey.ApplyMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return vpcnetworkInfo
+				})
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetSetHasBindings", func(_ *SubnetSetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetService.SubnetStore), "GetByIndex", func(_ *subnet.SubnetStore, key string, value string) []*model.VpcSubnet {
@@ -210,6 +229,9 @@ func TestReconcile(t *testing.T) {
 				vpcnetworkInfo := &common.VPCNetworkConfigInfo{DefaultSubnetSize: 32}
 				patches := gomonkey.ApplyMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return vpcnetworkInfo
+				})
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetSetHasBindings", func(_ *SubnetSetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetService.SubnetStore), "GetByIndex", func(_ *subnet.SubnetStore, key string, value string) []*model.VpcSubnet {
@@ -306,6 +328,10 @@ func TestReconcile_DeleteSubnetSet(t *testing.T) {
 					}
 				})
 
+				patches.ApplyMethod(reflect.TypeOf(r.BindingService), "DeleteSubnetConnectionBindingMapsByParentSubnets", func(_ *subnetbinding.BindingService, parentSubnets []*model.VpcSubnet) error {
+					return nil
+				})
+
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetPortService), "GetPortsOfSubnet", func(_ *subnetport.SubnetPortService, _ string) (ports []*model.VpcSubnetPort) {
 					return nil
 				})
@@ -339,6 +365,10 @@ func TestReconcile_DeleteSubnetSet(t *testing.T) {
 					return []*model.VpcSubnet{
 						&vpcSubnetSkip, &vpcSubnetDelete,
 					}
+				})
+
+				patches.ApplyMethod(reflect.TypeOf(r.BindingService), "DeleteSubnetConnectionBindingMapsByParentSubnets", func(_ *subnetbinding.BindingService, parentSubnets []*model.VpcSubnet) error {
+					return nil
 				})
 
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetPortService), "GetPortsOfSubnet", func(_ *subnetport.SubnetPortService, _ string) (ports []*model.VpcSubnetPort) {
@@ -383,6 +413,10 @@ func TestReconcile_DeleteSubnetSet(t *testing.T) {
 					return []*model.VpcSubnet{
 						&vpcSubnetSkip, &vpcSubnetDelete,
 					}
+				})
+
+				patches.ApplyMethod(reflect.TypeOf(r.BindingService), "DeleteSubnetConnectionBindingMapsByParentSubnets", func(_ *subnetbinding.BindingService, parentSubnets []*model.VpcSubnet) error {
+					return nil
 				})
 
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetPortService), "GetPortsOfSubnet", func(_ *subnetport.SubnetPortService, _ string) (ports []*model.VpcSubnetPort) {
@@ -449,7 +483,12 @@ func TestReconcile_DeleteSubnetSet_WithFinalizer(t *testing.T) {
 			&vpcSubnet,
 		}
 	})
+
 	defer patches.Reset()
+
+	patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetSetHasBindings", func(_ *SubnetSetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+		return []*v1alpha1.SubnetConnectionBindingMap{}
+	})
 
 	patches.ApplyMethod(reflect.TypeOf(r.SubnetPortService), "GetPortsOfSubnet", func(_ *subnetport.SubnetPortService, _ string) (ports []*model.VpcSubnetPort) {
 		return nil
@@ -542,6 +581,9 @@ func TestSubnetSetReconciler_CollectGarbage(t *testing.T) {
 	patches.ApplyMethod(reflect.TypeOf(r.SubnetPortService), "GetPortsOfSubnet", func(_ *subnetport.SubnetPortService, _ string) (ports []*model.VpcSubnetPort) {
 		return nil
 	})
+	patches.ApplyMethod(reflect.TypeOf(r.BindingService), "DeleteSubnetConnectionBindingMapsByParentSubnets", func(_ *subnetbinding.BindingService, parentSubnets []*model.VpcSubnet) error {
+		return nil
+	})
 	patches.ApplyMethod(reflect.TypeOf(r.SubnetService), "DeleteSubnet", func(_ *subnet.SubnetService, subnet model.VpcSubnet) error {
 		return nil
 	})
@@ -628,6 +670,10 @@ func TestStartSubnetSetController(t *testing.T) {
 		Service:         common.Service{},
 		SubnetPortStore: nil,
 	}
+	subnetBindingService := &subnetbinding.BindingService{
+		Service:      common.Service{},
+		BindingStore: nil,
+	}
 
 	mockMgr := &MockManager{scheme: runtime.NewScheme()}
 
@@ -695,7 +741,7 @@ func TestStartSubnetSetController(t *testing.T) {
 			patches := testCase.patches()
 			defer patches.Reset()
 
-			err := StartSubnetSetController(mockMgr, subnetService, subnetPortService, vpcService, testCase.webHookServer)
+			err := StartSubnetSetController(mockMgr, subnetService, subnetPortService, vpcService, subnetBindingService, testCase.webHookServer)
 
 			if testCase.expectErrStr != "" {
 				assert.ErrorContains(t, err, testCase.expectErrStr)

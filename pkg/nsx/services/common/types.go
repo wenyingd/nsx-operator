@@ -71,6 +71,12 @@ const (
 	TagScopeSubnetCRName               string = "nsx-op/subnet_name"
 	TagScopeSubnetSetCRName            string = "nsx-op/subnetset_name"
 	TagScopeSubnetSetCRUID             string = "nsx-op/subnetset_uid"
+	TagScopeSubnetBindingCRName        string = "nsx-op/subnetbinding_name"
+	TagScopeSubnetBindingCRUID         string = "nsx-op/subnetbinding_uid"
+	TagScopeParentSubnetCRName         string = "nsx-op/parentsubnet_name"
+	TagScopeParentSubnetCRUID          string = "nsx-op/parentsubnet_uid"
+	TagScopeParentSubnetSetCRName      string = "nsx-op/parentsubnetset_name"
+	TagScopeParentSubnetSetCRUID       string = "nsx-op/parentsubnetset_uid"
 	TagValueGroupScope                 string = "scope"
 	TagValueGroupSource                string = "source"
 	TagValueGroupDestination           string = "destination"
@@ -95,6 +101,8 @@ const (
 
 	NSXServiceAccountFinalizerName = "nsxserviceaccount.nsx.vmware.com/finalizer"
 	T1SecurityPolicyFinalizerName  = "securitypolicy.nsx.vmware.com/finalizer"
+	SubnetFinalizerName            = "subnet.nsx.vmware.com/finalizer"
+	SubnetSetFinalizerName         = "subnetset.nsx.vmware.com/finalizer"
 
 	IndexKeySubnetID            = "IndexKeySubnetID"
 	IndexKeyNodeName            = "IndexKeyNodeName"
@@ -160,6 +168,7 @@ var (
 	ResourceTypeLBTcpMonitorProfile          = "LBTcpMonitorProfile"
 	ResourceTypeLBVirtualServer              = "LBVirtualServer"
 	ResourceTypeLBPool                       = "LBPool"
+	ResourceTypeSubnetConnectionBIndingMap   = "SubnetConnectionBindingMap"
 
 	// ResourceTypeClusterControlPlane is used by NSXServiceAccountController
 	ResourceTypeClusterControlPlane = "clustercontrolplane"

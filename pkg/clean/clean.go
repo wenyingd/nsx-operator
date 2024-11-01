@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnetbinding"
 	"time"
 
 	"github.com/vmware-tanzu/nsx-operator/pkg/config"
@@ -168,9 +169,15 @@ func InitializeCleanupService(cf *config.NSXOperatorConfig, nsxClient *nsx.Clien
 			return ipaddressallocation.InitializeIPAddressAllocation(service, vpcService, true)
 		}
 	}
+	wrapInitializeSubnetBinding := func(service common.Service) cleanupFunc {
+		return func() (cleanup, error) {
+			return subnetbinding.InitializeService(service)
+		}
+	}
 	// TODO: initialize other CR services
 	cleanupService = cleanupService.
 		AddCleanupService(wrapInitializeSubnetPort(commonService)).
+		AddCleanupService(wrapInitializeSubnetBinding(commonService)).
 		AddCleanupService(wrapInitializeSubnetService(commonService)).
 		AddCleanupService(wrapInitializeSecurityPolicy(commonService)).
 		AddCleanupService(wrapInitializeStaticRoute(commonService)).

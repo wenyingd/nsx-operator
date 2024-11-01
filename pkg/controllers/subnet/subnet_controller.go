@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	servicecommon "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnet"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnetbinding"
 	nsxutil "github.com/vmware-tanzu/nsx-operator/pkg/nsx/util"
 )
 
@@ -36,6 +38,11 @@ var (
 	ResultRequeueAfter5mins = common.ResultRequeueAfter5mins
 	ResultRequeueAfter10sec = common.ResultRequeueAfter10sec
 	MetricResTypeSubnet     = common.MetricResTypeSubnet
+
+	msgFailAddFinalizer = "Failed to add finalizer on Subnet for the dependency by SubnetConnectionBindingMap %s"
+	msgFailDelFinalizer = "Failed to remove finalizer on Subnet after no the dependency by SubnetConnectionBindingMaps"
+	msgDeleteInUse      = "Subnet is used by SubnetConnectionBindingMap %s and not able to delete"
+	reasonDeleteInUse   = "SubnetInUse"
 )
 
 // SubnetReconciler reconciles a SubnetSet object
@@ -45,6 +52,7 @@ type SubnetReconciler struct {
 	SubnetService     *subnet.SubnetService
 	SubnetPortService servicecommon.SubnetPortServiceProvider
 	VPCService        servicecommon.VPCServiceProvider
+	BindingService    *subnetbinding.BindingService
 	Recorder          record.EventRecorder
 	StatusUpdater     common.StatusUpdater
 }
@@ -70,8 +78,37 @@ func (r *SubnetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		log.Error(err, "Unable to fetch Subnet CR", "req", req.NamespacedName)
 		return ResultRequeue, err
 	}
+
+	hasBindings := r.subnetHasBindings(string(subnetCR.UID))
+	if len(hasBindings) > 0 {
+		if !controllerutil.ContainsFinalizer(subnetCR, servicecommon.SubnetFinalizerName) {
+			controllerutil.AddFinalizer(subnetCR, servicecommon.SubnetFinalizerName)
+			if err := r.Client.Update(ctx, subnetCR); err != nil {
+				log.Error(err, "Failed to add finalizer", "subnet", req.NamespacedName)
+				r.StatusUpdater.UpdateFail(ctx, subnetCR, err, "Failed to add finalizer on Subnet used by SubnetConnectionBindingMaps", setSubnetReadyStatusFalse, fmt.Sprintf(msgFailAddFinalizer, hasBindings[0].Name))
+				return ResultRequeue, err
+			}
+		}
+	} else {
+		if controllerutil.ContainsFinalizer(subnetCR, servicecommon.SubnetFinalizerName) {
+			controllerutil.RemoveFinalizer(subnetCR, servicecommon.SubnetFinalizerName)
+			if err := r.Client.Update(ctx, subnetCR); err != nil {
+				log.Error(err, "Failed to delete finalizer", "subnet", req.NamespacedName)
+				r.StatusUpdater.UpdateFail(ctx, subnetCR, err, "Failed to delete finalizer from Subnet", setSubnetReadyStatusFalse, fmt.Sprintf(msgFailDelFinalizer))
+				return ResultRequeue, err
+			}
+		}
+	}
+
 	if !subnetCR.DeletionTimestamp.IsZero() {
 		r.StatusUpdater.IncreaseDeleteTotal()
+		if len(hasBindings) > 0 {
+			err := fmt.Errorf("subnet %s is used by SubnetConnectionBindingMaps %s", req.String(), hasBindings[0].GetName())
+			log.Error(err, "Failed to delete Subnet CR because it is used by SubnetConnectionBindingMaps, retrying", "Subnet", req.NamespacedName)
+			r.setSubnetDeletionFailedStatus(ctx, subnetCR, metav1.Now(), fmt.Sprintf(msgDeleteInUse, hasBindings[0].GetName()), reasonDeleteInUse)
+			r.StatusUpdater.DeleteFail(req.NamespacedName, nil, err)
+			return ResultRequeue, err
+		}
 		if err := r.deleteSubnetByID(string(subnetCR.GetUID())); err != nil {
 			r.StatusUpdater.DeleteFail(req.NamespacedName, nil, err)
 			return ResultRequeue, err
@@ -248,6 +285,25 @@ func setSubnetReadyStatusFalse(client client.Client, ctx context.Context, obj cl
 	updateSubnetStatusConditions(client, ctx, subnet, newConditions)
 }
 
+func (r *SubnetReconciler) setSubnetDeletionFailedStatus(ctx context.Context, subnet *v1alpha1.Subnet, transitionTime metav1.Time, msg string, reason string) {
+	newConditions := []v1alpha1.Condition{
+		{
+			Type:               v1alpha1.DeleteFailure,
+			Status:             v1.ConditionTrue,
+			Message:            "Subnet could not be deleted",
+			Reason:             "NSXOperationFailed",
+			LastTransitionTime: transitionTime,
+		},
+	}
+	if msg != "" {
+		newConditions[0].Message = msg
+	}
+	if reason != "" {
+		newConditions[0].Reason = reason
+	}
+	updateSubnetStatusConditions(r.Client, ctx, subnet, newConditions)
+}
+
 func updateSubnetStatusConditions(client client.Client, ctx context.Context, subnet *v1alpha1.Subnet, newConditions []v1alpha1.Condition) {
 	conditionsUpdated := false
 	for i := range newConditions {
@@ -339,6 +395,16 @@ func (r *SubnetReconciler) setupWithManager(mgr ctrl.Manager) error {
 			&v1.Namespace{},
 			&EnqueueRequestForNamespace{Client: mgr.GetClient()},
 			builder.WithPredicates(PredicateFuncsNs),
+		).
+		Watches(
+			&v1alpha1.SubnetConnectionBindingMap{},
+			&common.EnqueueRequestForDependency{
+				Client:          r.Client,
+				ResourceType:    "SubnetConnectionBindingMap",
+				RequeueByUpdate: requeueSubnetByBindingMapUpdate,
+				RequeueByDelete: requeueSubnetByBindingMapDelete,
+			},
+			builder.WithPredicates(common.PredicateFuncsWithBindingMapUpdateDelete),
 		).
 		// Set controller options, including max concurrent reconciles
 		WithOptions(

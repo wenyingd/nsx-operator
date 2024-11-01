@@ -74,34 +74,35 @@ type Client struct {
 	VPCSecurityClient vpcs.SecurityPoliciesClient
 	VPCRuleClient     vpc_sp.RulesClient
 
-	OrgRootClient                  nsx_policy.OrgRootClient
-	ProjectInfraClient             projects.InfraClient
-	VPCClient                      projects.VpcsClient
-	VPCConnectivityProfilesClient  projects.VpcConnectivityProfilesClient
-	IPBlockClient                  project_infra.IpBlocksClient
-	StaticRouteClient              vpcs.StaticRoutesClient
-	NATRuleClient                  nat.NatRulesClient
-	VpcGroupClient                 vpcs.GroupsClient
-	PortClient                     subnets.PortsClient
-	PortStateClient                ports.StateClient
-	IPPoolClient                   subnets.IpPoolsClient
-	IPAllocationClient             ip_pools.IpAllocationsClient
-	SubnetsClient                  vpcs.SubnetsClient
-	RealizedStateClient            realized_state.RealizedEntitiesClient
-	IPAddressAllocationClient      vpcs.IpAddressAllocationsClient
-	VPCLBSClient                   vpcs.VpcLbsClient
-	VpcLbVirtualServersClient      vpcs.VpcLbVirtualServersClient
-	VpcLbPoolsClient               vpcs.VpcLbPoolsClient
-	VpcAttachmentClient            vpcs.AttachmentsClient
-	ProjectClient                  orgs.ProjectsClient
-	TransitGatewayClient           projects.TransitGatewaysClient
-	TransitGatewayAttachmentClient transit_gateways.AttachmentsClient
-	CertificateClient              infra.CertificatesClient
-	ShareClient                    infra.SharesClient
-	SharedResourceClient           shares.ResourcesClient
-	LbAppProfileClient             infra.LbAppProfilesClient
-	LbPersistenceProfilesClient    infra.LbPersistenceProfilesClient
-	LbMonitorProfilesClient        infra.LbMonitorProfilesClient
+	OrgRootClient                     nsx_policy.OrgRootClient
+	ProjectInfraClient                projects.InfraClient
+	VPCClient                         projects.VpcsClient
+	VPCConnectivityProfilesClient     projects.VpcConnectivityProfilesClient
+	IPBlockClient                     project_infra.IpBlocksClient
+	StaticRouteClient                 vpcs.StaticRoutesClient
+	NATRuleClient                     nat.NatRulesClient
+	VpcGroupClient                    vpcs.GroupsClient
+	PortClient                        subnets.PortsClient
+	PortStateClient                   ports.StateClient
+	IPPoolClient                      subnets.IpPoolsClient
+	IPAllocationClient                ip_pools.IpAllocationsClient
+	SubnetsClient                     vpcs.SubnetsClient
+	RealizedStateClient               realized_state.RealizedEntitiesClient
+	IPAddressAllocationClient         vpcs.IpAddressAllocationsClient
+	VPCLBSClient                      vpcs.VpcLbsClient
+	VpcLbVirtualServersClient         vpcs.VpcLbVirtualServersClient
+	VpcLbPoolsClient                  vpcs.VpcLbPoolsClient
+	VpcAttachmentClient               vpcs.AttachmentsClient
+	ProjectClient                     orgs.ProjectsClient
+	TransitGatewayClient              projects.TransitGatewaysClient
+	TransitGatewayAttachmentClient    transit_gateways.AttachmentsClient
+	CertificateClient                 infra.CertificatesClient
+	ShareClient                       infra.SharesClient
+	SharedResourceClient              shares.ResourcesClient
+	LbAppProfileClient                infra.LbAppProfilesClient
+	LbPersistenceProfilesClient       infra.LbPersistenceProfilesClient
+	LbMonitorProfilesClient           infra.LbMonitorProfilesClient
+	SubnetConnectionBindingMapsClient subnets.SubnetConnectionBindingMapsClient
 
 	NSXChecker    NSXHealthChecker
 	NSXVerChecker NSXVersionChecker

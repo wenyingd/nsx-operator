@@ -34,12 +34,14 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/controllers/service"
 	staticroutecontroller "github.com/vmware-tanzu/nsx-operator/pkg/controllers/staticroute"
 	"github.com/vmware-tanzu/nsx-operator/pkg/controllers/subnet"
+	subnetbindingcontroller "github.com/vmware-tanzu/nsx-operator/pkg/controllers/subnetbinding"
 	"github.com/vmware-tanzu/nsx-operator/pkg/controllers/subnetport"
 	"github.com/vmware-tanzu/nsx-operator/pkg/controllers/subnetset"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/ipblocksinfo"
 	nodeservice "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/node"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/staticroute"
 	subnetservice "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnet"
+	subnetbindingservice "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnetbinding"
 	subnetportservice "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/subnetport"
 
 	commonctl "github.com/vmware-tanzu/nsx-operator/pkg/controllers/common"
@@ -221,6 +223,13 @@ func startServiceController(mgr manager.Manager, nsxClient *nsx.Client) {
 			os.Exit(1)
 		}
 		ipblocksInfoService := ipblocksinfo.InitializeIPBlocksInfoService(commonService)
+
+		subnetBindingService, err := subnetbindingservice.InitializeService(commonService)
+		if err != nil {
+			log.Error(err, "Failed to initialize subnetConnectionBindingMap commonService")
+			os.Exit(1)
+		}
+
 		// Start controllers which only supports VPC
 		StartNetworkInfoController(mgr, vpcService, ipblocksInfoService)
 		StartNamespaceController(mgr, cf, vpcService)
@@ -242,7 +251,7 @@ func startServiceController(mgr manager.Manager, nsxClient *nsx.Client) {
 		if err := subnet.StartSubnetController(mgr, subnetService, subnetPortService, vpcService, hookServer); err != nil {
 			os.Exit(1)
 		}
-		if err := subnetset.StartSubnetSetController(mgr, subnetService, subnetPortService, vpcService, hookServer); err != nil {
+		if err := subnetset.StartSubnetSetController(mgr, subnetService, subnetPortService, vpcService, subnetBindingService, hookServer); err != nil {
 			os.Exit(1)
 		}
 
@@ -253,6 +262,7 @@ func startServiceController(mgr manager.Manager, nsxClient *nsx.Client) {
 		StartIPAddressAllocationController(mgr, ipAddressAllocationService, vpcService)
 		networkpolicycontroller.StartNetworkPolicyController(mgr, commonService, vpcService)
 		service.StartServiceLbController(mgr, commonService)
+		subnetbindingcontroller.StartSubnetBindingController(mgr, subnetService, subnetBindingService)
 	}
 	// Start controllers which can run in non-VPC mode
 	securitypolicycontroller.StartSecurityPolicyController(mgr, commonService, vpcService)

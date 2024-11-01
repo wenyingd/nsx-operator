@@ -370,6 +370,9 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 				patches := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r), "deleteSubnetByID", func(_ *SubnetReconciler, _ string) error {
 					return nil
 				})
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
+				})
 				return patches
 			},
 			expectRes:        ResultNormal,
@@ -398,6 +401,9 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 					return []*model.VpcSubnet{
 						&vpcSubnetSkip, &vpcSubnetDelete,
 					}
+				})
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetPortService), "GetPortsOfSubnet", func(_ *subnetport.SubnetPortService, _ string) (ports []*model.VpcSubnetPort) {
 					return nil
@@ -434,6 +440,9 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 						&vpcSubnetSkip, &vpcSubnetDelete,
 					}
 				})
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
+				})
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetPortService), "GetPortsOfSubnet", func(_ *subnetport.SubnetPortService, _ string) (ports []*model.VpcSubnetPort) {
 					return nil
 				})
@@ -453,6 +462,10 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 				vpcConfig := &common.VPCNetworkConfigInfo{DefaultSubnetSize: 16}
 				patches := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return vpcConfig
+				})
+
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 
 				tags := []model.Tag{{Scope: common.String(common.TagScopeSubnetCRUID), Tag: common.String("fake-tag")}}
@@ -481,6 +494,10 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 				vpcConfig := &common.VPCNetworkConfigInfo{DefaultSubnetSize: 16}
 				patches := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return vpcConfig
+				})
+
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 
 				tags := []model.Tag{{Scope: common.String(common.TagScopeSubnetCRUID), Tag: common.String("fake-tag")}}
@@ -533,6 +550,10 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 					return vpcConfig
 				})
 
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
+				})
+
 				tags := []model.Tag{{Scope: common.String(common.TagScopeSubnetCRUID), Tag: common.String("fake-tag")}}
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetService), "GenerateSubnetNSTags", func(_ *subnet.SubnetService, obj client.Object) []model.Tag {
 					return tags
@@ -568,6 +589,9 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 				patches := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return nil
 				})
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
+				})
 				return patches
 			},
 			existingSubnetCR: createNewSubnet(),
@@ -581,6 +605,10 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 				vpcConfig := &common.VPCNetworkConfigInfo{DefaultSubnetSize: 16}
 				patches := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return vpcConfig
+				})
+
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 
 				patches.ApplyMethod(reflect.TypeOf(r.SubnetService), "GenerateSubnetNSTags", func(_ *subnet.SubnetService, obj client.Object) []model.Tag {
@@ -599,6 +627,10 @@ func TestSubnetReconciler_Reconcile(t *testing.T) {
 				vpcConfig := &common.VPCNetworkConfigInfo{DefaultSubnetSize: 16}
 				patches := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r.VPCService), "GetVPCNetworkConfigByNamespace", func(_ *vpc.VPCService, ns string) *common.VPCNetworkConfigInfo {
 					return vpcConfig
+				})
+
+				patches.ApplyPrivateMethod(reflect.TypeOf(r), "subnetHasBindings", func(_ *SubnetReconciler, subnetSetCRUID string) []*v1alpha1.SubnetConnectionBindingMap {
+					return []*v1alpha1.SubnetConnectionBindingMap{}
 				})
 
 				tags := []model.Tag{{Scope: common.String(common.TagScopeSubnetCRUID), Tag: common.String("fake-tag")}}
