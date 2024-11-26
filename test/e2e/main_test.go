@@ -19,6 +19,8 @@ func testMain(m *testing.M) int {
 	flag.StringVar(&testOptions.providerConfigPath, "provider-cfg-path", "", "Optional config file for provider")
 	flag.StringVar(&testOptions.logsExportDir, "logs-export-dir", "", "Export directory for test logs")
 	flag.StringVar(&testOptions.operatorConfigPath, "operator-cfg-path", "/etc/nsx-ujo/ncp.ini", "config file for operator")
+	flag.StringVar(&testOptions.vcUser, "vc-user", "", "The username used to request vCenter API session")
+	flag.StringVar(&testOptions.vcPassword, "vc-password", "", "The password used by the user when requesting vCenter API session")
 	flag.BoolVar(&testOptions.logsExportOnSuccess, "logs-export-on-success", false, "Export logs even when a test is successful")
 	flag.BoolVar(&testOptions.debugLog, "debug", false, "")
 	flag.Parse()
@@ -37,7 +39,7 @@ func testMain(m *testing.M) int {
 
 	log.Info("Creating clientSets")
 
-	if err := NewTestData(testOptions.operatorConfigPath); err != nil {
+	if err := NewTestData(testOptions.operatorConfigPath, testOptions.vcUser, testOptions.vcPassword); err != nil {
 		log.Error(err, "Error when creating client")
 		return 1
 	}
