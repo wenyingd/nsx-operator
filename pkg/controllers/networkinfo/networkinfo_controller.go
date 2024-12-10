@@ -357,10 +357,6 @@ func (r *NetworkInfoReconciler) setupWithManager(mgr ctrl.Manager) error {
 				ipBlocksInfoService: r.IPBlocksInfoService,
 			},
 			builder.WithPredicates(VPCNetworkConfigurationPredicate)).
-		Watches(
-			&corev1.Namespace{},
-			&NamespaceHandler{},
-			builder.WithPredicates(NamespacePredicate)).
 		Complete(r)
 }
 
@@ -387,8 +383,11 @@ func (r *NetworkInfoReconciler) listNamespaceCRsNameIDSet(ctx context.Context) (
 	nsSet := sets.Set[string]{}
 	idSet := sets.Set[string]{}
 	for _, ns := range namespaces.Items {
-		nsSet.Insert(ns.Name)
-		idSet.Insert(string(ns.UID))
+		// Ignore the terminating Namespaces in the list results.
+		if ns.DeletionTimestamp.IsZero() {
+			nsSet.Insert(ns.Name)
+			idSet.Insert(string(ns.UID))
+		}
 	}
 	return nsSet, idSet, nil
 }
@@ -438,24 +437,6 @@ func (r *NetworkInfoReconciler) CollectGarbage(ctx context.Context) {
 	}
 }
 
-func (r *NetworkInfoReconciler) fetchStaleVPCsByNamespace(ctx context.Context, ns string) ([]*model.Vpc, error) {
-	isShared, err := r.Service.IsSharedVPCNamespaceByNS(ctx, ns)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			// if the Namespace has been deleted, we never know whether it`s a shared Namespace, The GC will delete the stale VPCs
-			log.Info("Namespace does not exist while fetching stale VPCs", "Namespace", ns)
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to check if Namespace is shared for NS %s: %w", ns, err)
-	}
-	if isShared {
-		log.Info("Shared Namespace, skipping deletion of NSX VPC", "Namespace", ns)
-		return nil, nil
-	}
-
-	return r.Service.GetVPCsByNamespace(ns), nil
-}
-
 func (r *NetworkInfoReconciler) deleteVPCsByName(ctx context.Context, ns string) error {
 	staleVPCs := r.Service.GetVPCsByNamespace(ns)
 	if len(staleVPCs) == 0 {
@@ -480,20 +461,12 @@ func (r *NetworkInfoReconciler) deleteVPCsByName(ctx context.Context, ns string)
 	return r.deleteVPCs(ctx, vpcToDelete, ns)
 }
 
+// deleteVPCsByID is called when the NetworkInfo CR still exists in the K8s api-server, and the CR's
+// deletionTimestamp is not 0. In this case, it's Namespace must exist, and no other Namespaces configured
+// with the same name. So we can directly use the Namespace's name to find the stale VPCs to delete.
 func (r *NetworkInfoReconciler) deleteVPCsByID(ctx context.Context, ns, id string) error {
-	staleVPCs, err := r.fetchStaleVPCsByNamespace(ctx, ns)
-	if err != nil {
-		return err
-	}
-
-	var vpcToDelete []*model.Vpc
-	for _, nsxVPC := range staleVPCs {
-		namespaceIDofVPC := filterTagFromNSXVPC(nsxVPC, commonservice.TagScopeNamespaceUID)
-		if namespaceIDofVPC == id {
-			vpcToDelete = append(vpcToDelete, nsxVPC)
-		}
-	}
-	return r.deleteVPCs(ctx, vpcToDelete, ns)
+	staleVPCs := r.Service.GetVPCsByNamespace(ns)
+	return r.deleteVPCs(ctx, staleVPCs, ns)
 }
 
 func (r *NetworkInfoReconciler) deleteVPCs(ctx context.Context, staleVPCs []*model.Vpc, ns string) error {
@@ -519,9 +492,18 @@ func (r *NetworkInfoReconciler) deleteVPCs(ctx context.Context, staleVPCs []*mod
 	// Update the VPCNetworkConfiguration Status
 	vpcNetConfig := r.Service.GetVPCNetworkConfigByNamespace(ns)
 	if vpcNetConfig != nil {
-		deleteVPCNetworkConfigurationStatus(ctx, r.Client, vpcNetConfig.Name, staleVPCs, r.Service.ListVPC())
+		updateVPCNetworkConfigurationStatusWithAliveVPCs(ctx, r.Client, vpcNetConfig.Name, r.listVPCsByNetworkConfigName)
 	}
 	return nil
+}
+
+func (r *NetworkInfoReconciler) listVPCsByNetworkConfigName(ncName string) []*model.Vpc {
+	namespacesUsingNC := r.Service.GetNamespacesByNetworkconfigName(ncName)
+	aliveVPCs := make([]*model.Vpc, 0)
+	for _, namespace := range namespacesUsingNC {
+		aliveVPCs = append(aliveVPCs, r.Service.GetVPCsByNamespace(namespace)...)
+	}
+	return aliveVPCs
 }
 
 func (r *NetworkInfoReconciler) syncPreCreatedVpcIPs(ctx context.Context) {
