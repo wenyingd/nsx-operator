@@ -2,6 +2,7 @@ package staticroute
 
 import (
 	"errors"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/vmware/vsphere-automation-sdk-go/services/nsxt/model"
 	"k8s.io/client-go/tools/cache"
@@ -87,6 +88,14 @@ func (StaticRouteStore *StaticRouteStore) DeleteMultipleObjects(routes []*model.
 	for _, route := range routes {
 		StaticRouteStore.Delete(route)
 	}
+}
+
+func (StaticRouteStore *StaticRouteStore) GetStaticRoutesByCRUID(uid types.UID) *model.StaticRoutes {
+	staticRoutes := StaticRouteStore.ResourceStore.GetByIndex(common.TagScopeStaticRouteCRUID, string(uid))
+	if len(staticRoutes) == 0 {
+		return nil
+	}
+	return staticRoutes[0].(*model.StaticRoutes)
 }
 
 func buildStaticRouteStore() *StaticRouteStore {
