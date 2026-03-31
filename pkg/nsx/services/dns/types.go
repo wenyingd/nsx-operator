@@ -4,6 +4,7 @@
 package dns
 
 import (
+	"context"
 	"net"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,3 +36,27 @@ type Record struct {
 	Owner        *ResourceRef
 	ForSVService bool
 }
+
+// ZoneConfig represents a permitted NSX DNS forwarding zone.
+type ZoneConfig struct {
+	// Path is the NSX resource path for the DNS forwarder zone.
+	Path string
+	// Domain is the DNS domain name (e.g. "example.com").
+	Domain string
+}
+
+// recordRequest groups FQDNs (keyed by NSX zone path) and IP addresses for a single owner.
+// It is the internal representation passed to configureDNSRecords / buildDNSRecordResource.
+type recordRequest struct {
+	// fqdns maps NSX zone path → list of FQDNs that belong to that zone.
+	fqdns           map[string][]string
+	ips             []net.IP
+	owner           *ResourceRef
+	addressProvider *ResourceRef
+	forSVService    bool
+}
+
+// GetPermittedZonesFunc is the type of the function that resolves permitted DNS zones for a
+// given namespace.  The field on DNSRecordService with this type allows tests to inject a fake
+// implementation without monkey-patching the private getPermittedZones method.
+type GetPermittedZonesFunc func(ctx context.Context, namespace string) ([]ZoneConfig, error)

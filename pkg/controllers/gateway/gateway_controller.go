@@ -49,6 +49,10 @@ var (
 	log                    = logger.Log
 	ResultNormal           = common.ResultNormal
 	filteredGatewayClasses = sets.New[string](common.ManagedK8sGatewayClassIstio)
+	// startPeriodicGatewayGC launches the DNS garbage collector loop; tests replace it to avoid background races.
+	startPeriodicGatewayGC = func(cancel chan bool, interval time.Duration, collect func(context.Context) error) {
+		go common.GenericGarbageCollector(cancel, interval, collect)
+	}
 )
 
 // statusUpdater is an interface for test
@@ -456,7 +460,17 @@ func hasUsableGatewayIP(gw *gatewayv1.Gateway) bool {
 	return len(collectIPsFromGateway(gw)) > 0
 }
 
+// setupWithManagerTestHook, when set by tests, skips controller-runtime registration (minimal mgr cannot Complete).
+var setupWithManagerTestHook func(*GatewayReconciler, ctrl.Manager) error
+
 func (r *GatewayReconciler) setupWithManager(mgr ctrl.Manager) error {
+	if setupWithManagerTestHook != nil {
+		return setupWithManagerTestHook(r, mgr)
+	}
+	return r.setupWithManagerImpl(mgr)
+}
+
+func (r *GatewayReconciler) setupWithManagerImpl(mgr ctrl.Manager) error {
 	if r.listenerSetEnabled {
 		// Register the ListenerSet→Gateway field index only when the CRD is present;
 		// the index is required by listListenerSetsForGateway at reconcile time.
@@ -608,7 +622,7 @@ func (r *GatewayReconciler) StartController(mgr ctrl.Manager, _ webhook.Server) 
 		log.Error(err, "Failed to create controller", "controller", "Gateway")
 		return err
 	}
-	go common.GenericGarbageCollector(make(chan bool), servicecommon.GCInterval, r.CollectGarbage)
+	startPeriodicGatewayGC(make(chan bool), servicecommon.GCInterval, r.CollectGarbage)
 	return nil
 }
 

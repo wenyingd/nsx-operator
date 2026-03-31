@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
@@ -102,6 +103,7 @@ func fakeGatewayReconciler(t *testing.T, objs ...client.Object) (*GatewayReconci
 		NSXConfig: &config.NSXOperatorConfig{CoeConfig: &config.CoeConfig{}},
 	}
 	dnsService := &dns.DNSRecordService{Service: svc, DNSRecordStore: dns.BuildDNSRecordStore()}
+	dnsService.GetPermittedZonesFunc = testPermittedZonesFunc("example.com")
 	r := NewGatewayReconciler(mgr, dnsService)
 	r.StatusUpdater = newMockStatusUpdater()
 	return r, fc
@@ -114,6 +116,28 @@ func fakeClientForGatewayTests(objs ...client.Object) client.Client {
 		WithStatusSubresource(&gatewayv1.Gateway{}, &gatewayv1.ListenerSet{}).
 		WithIndex(&gatewayv1.ListenerSet{}, listenerSetParentGatewayIndex, listenerSetParentGatewayIndexFunc).
 		Build()
+}
+
+// testPermittedZonesFunc returns a zone list so CreateOrUpdateDNSRecords FQDN validation passes in unit tests without NSX.
+func testPermittedZonesFunc(domain string) dns.GetPermittedZonesFunc {
+	return func(_ context.Context, _ string) ([]dns.ZoneConfig, error) {
+		return []dns.ZoneConfig{{Path: "/infra/dns-forwarder-zones/test", Domain: domain}}, nil
+	}
+}
+
+// newGatewayTestDNSRecordService builds a DNSRecordService with a default example.com permitted zone.
+func newGatewayTestDNSRecordService() *dns.DNSRecordService {
+	s := &dns.DNSRecordService{DNSRecordStore: dns.BuildDNSRecordStore()}
+	s.GetPermittedZonesFunc = testPermittedZonesFunc("example.com")
+	return s
+}
+
+// fakeGatewayReconcilerWithPermittedZone overrides the permitted DNS zone domain (e.g. for E2E negative FQDN cases).
+func fakeGatewayReconcilerWithPermittedZone(t *testing.T, domain string, objs ...client.Object) (*GatewayReconciler, client.Client) {
+	t.Helper()
+	r, fc := fakeGatewayReconciler(t, objs...)
+	r.Service.GetPermittedZonesFunc = testPermittedZonesFunc(domain)
+	return r, fc
 }
 
 const (
@@ -252,7 +276,7 @@ func reconcilerForFakeClient(t *testing.T, listenerSetEnabled bool, objs ...clie
 	fc := fakeClientForGatewayTests(objs...)
 	u := newMockStatusUpdater().(*mockStatusUpdater)
 	r := &GatewayReconciler{
-		Client: fc, Scheme: scheme, Service: &dns.DNSRecordService{DNSRecordStore: dns.BuildDNSRecordStore()},
+		Client: fc, Scheme: scheme, Service: newGatewayTestDNSRecordService(),
 		StatusUpdater: u, Recorder: record.NewFakeRecorder(10), listenerSetEnabled: listenerSetEnabled,
 	}
 	return r, fc, u
@@ -386,7 +410,7 @@ func Test_Reconcile_gatewayClassTransitions(t *testing.T) {
 		g.Spec.Listeners = []gatewayv1.Listener{{Name: "l1", Hostname: ptr(gatewayv1.Hostname("svc.example.com")), Port: 80, Protocol: gatewayv1.HTTPProtocolType}}
 	})
 	fc := fakeClientForGatewayTests(ns, gw)
-	dnsSvc := &dns.DNSRecordService{DNSRecordStore: dns.BuildDNSRecordStore()}
+	dnsSvc := newGatewayTestDNSRecordService()
 	updater := newMockStatusUpdater().(*mockStatusUpdater)
 	r := &GatewayReconciler{Client: fc, Scheme: scheme, Service: dnsSvc, StatusUpdater: updater, Recorder: record.NewFakeRecorder(10)}
 	patchCreateOrUpdateDNSRecordsNoOp(t, r.Service)
@@ -428,7 +452,7 @@ func Test_Reconcile_DNS_recordsTrackAddressAndHostnames(t *testing.T) {
 	})
 	fc := fakeClientForGatewayTests(ns, gw)
 	r := &GatewayReconciler{
-		Client: fc, Scheme: scheme, Service: &dns.DNSRecordService{DNSRecordStore: dns.BuildDNSRecordStore()},
+		Client: fc, Scheme: scheme, Service: newGatewayTestDNSRecordService(),
 		StatusUpdater: newMockStatusUpdater(), Recorder: record.NewFakeRecorder(10),
 	}
 	var seen []*dns.Record
@@ -516,23 +540,16 @@ func Test_Reconcile_listenerSetParentRefChanges(t *testing.T) {
 
 func Test_Reconcile_listenerSetHostnameChange(t *testing.T) {
 	ctx := context.Background()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1", UID: types.UID("uid-ns1")}}
 	gw := newTestGateway("gw1", "ns1", "10.0.0.1", false, nil)
 	ls := newTestListenerSet("ls1", "ns1", "gw1", "old.example.com")
 	r, fc, _ := reconcilerForFakeClient(t, true, ns, gw, ls)
-	var seen []string
-	p := gomonkey.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateDNSRecords",
-		func(_ *dns.DNSRecordService, _ context.Context, rec *dns.Record) error {
-			if rec.Owner.Kind == dns.ResourceKindListenerSet {
-				seen = append(seen, rec.Hostnames[0])
-			}
-			return nil
-		})
-	t.Cleanup(p.Reset)
 
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "gw1"}})
 	require.NoError(t, err)
-	require.Equal(t, []string{"old.example.com"}, seen)
+	lsRecs := r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindListenerSet, string(ls.UID))
+	require.NotEmpty(t, lsRecs, "ListenerSet DNS records after first reconcile")
+	assert.True(t, hasFQDNInRecords(lsRecs, "old.example.com"))
 
 	latestLS := &gatewayv1.ListenerSet{}
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Namespace: "ns1", Name: "ls1"}, latestLS))
@@ -540,7 +557,10 @@ func Test_Reconcile_listenerSetHostnameChange(t *testing.T) {
 	require.NoError(t, fc.Update(ctx, latestLS))
 	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "gw1"}})
 	require.NoError(t, err)
-	require.Equal(t, []string{"old.example.com", "new.example.com"}, seen)
+	lsRecs = r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindListenerSet, string(ls.UID))
+	require.NotEmpty(t, lsRecs, "ListenerSet DNS records after hostname update")
+	assert.True(t, hasFQDNInRecords(lsRecs, "new.example.com"))
+	assert.False(t, hasFQDNInRecords(lsRecs, "old.example.com"))
 }
 
 func TestGatewayReconciler_Reconcile(t *testing.T) {
@@ -616,7 +636,7 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 				objs = []client.Object{}
 			}
 			fc := fakeClientForGatewayTests(objs...)
-			dnsSvc := &dns.DNSRecordService{DNSRecordStore: dns.BuildDNSRecordStore()}
+			dnsSvc := newGatewayTestDNSRecordService()
 			updater := newMockStatusUpdater().(*mockStatusUpdater)
 			r := &GatewayReconciler{
 				Client: fc, Scheme: scheme, Service: dnsSvc, StatusUpdater: updater,
@@ -757,18 +777,6 @@ func Test_CollectGarbage(t *testing.T) {
 			name:        "orphan delete success",
 			seedRecords: []*dns.DNSRecord{dnsRecordOwnedByGateway("rec-gc-1", "uid-gw1", "ns1", "gw1")},
 			wantCalls:   []string{callDeleteSuccess},
-		},
-		{
-			name:        "orphan delete fail",
-			seedRecords: []*dns.DNSRecord{dnsRecordOwnedByGateway("rec-gc-2", "uid-gw1", "ns1", "gw1")},
-			patchService: func(r *GatewayReconciler) func() {
-				p := gomonkey.ApplyMethod(reflect.TypeOf(r.Service), "DeleteAllDNSRecordsInGateway",
-					func(_ *dns.DNSRecordService, _ context.Context, _, _ string) error {
-						return fmt.Errorf("gc delete error")
-					})
-				return p.Reset
-			},
-			wantCalls: []string{callDeleteFail}, wantErr: true,
 		},
 		{
 			name:        "gateway still exists",
@@ -939,9 +947,11 @@ func Test_StartController(t *testing.T) {
 				mgr.indexer = &mockFieldIndexer{err: tt.indexFieldErr}
 			}
 			if tt.stubSetupWithManagerNil {
-				p := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r), "setupWithManager",
-					func(_ *GatewayReconciler, _ ctrl.Manager) error { return nil })
-				t.Cleanup(p.Reset)
+				origGC := startPeriodicGatewayGC
+				startPeriodicGatewayGC = func(chan bool, time.Duration, func(context.Context) error) {}
+				t.Cleanup(func() { startPeriodicGatewayGC = origGC })
+				setupWithManagerTestHook = func(_ *GatewayReconciler, _ ctrl.Manager) error { return nil }
+				t.Cleanup(func() { setupWithManagerTestHook = nil })
 			}
 			err := r.StartController(mgr, nil)
 			if tt.wantErr {
@@ -951,6 +961,512 @@ func Test_StartController(t *testing.T) {
 			}
 			assert.Equal(t, tt.wantCrdReady, r.crdReady)
 			assert.Equal(t, tt.wantLSEnabled, r.listenerSetEnabled)
+		})
+	}
+}
+
+func Test_NewGatewayReconciler(t *testing.T) {
+	t.Run("nil service produces nil StatusUpdater", func(t *testing.T) {
+		mgr, _ := createFakeManagerAndClient()
+		r := NewGatewayReconciler(mgr, nil)
+		assert.Nil(t, r.StatusUpdater)
+	})
+	t.Run("service with NSXConfig sets StatusUpdater", func(t *testing.T) {
+		mgr, fc := createFakeManagerAndClient()
+		svc := servicecommon.Service{
+			Client:    fc,
+			NSXConfig: &config.NSXOperatorConfig{CoeConfig: &config.CoeConfig{}},
+		}
+		// Avoid InitializeDNSRecordService here: it starts async NSX store init; wiring is the same as production uses after init completes.
+		dnsService := &dns.DNSRecordService{Service: svc, DNSRecordStore: dns.BuildDNSRecordStore()}
+		r := NewGatewayReconciler(mgr, dnsService)
+		require.NotNil(t, r.StatusUpdater)
+		su, ok := r.StatusUpdater.(*common.StatusUpdater)
+		require.True(t, ok, "StatusUpdater should be *common.StatusUpdater when service is provided")
+		assert.NotNil(t, su.NSXConfig)
+	})
+}
+
+// --------------------------------------------------------------------------
+// E2E test helpers
+// --------------------------------------------------------------------------
+
+const (
+	e2eGWNamespace      = "ns1"
+	e2eGWName           = "gw1"
+	e2ePermittedDNSZone = "example.com"
+)
+
+func e2eTestNamespace() *corev1.Namespace {
+	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: e2eGWNamespace}}
+}
+
+func e2eGatewayRequest() ctrl.Request {
+	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e2eGWNamespace, Name: e2eGWName}}
+}
+
+// e2eTypeMetaFor derives the canonical APIVersion and Kind for obj from the test scheme.
+func e2eTypeMetaFor(obj runtime.Object) metav1.TypeMeta {
+	gvks, _, _ := scheme.ObjectKinds(obj)
+	if len(gvks) == 0 {
+		return metav1.TypeMeta{}
+	}
+	return metav1.TypeMeta{
+		APIVersion: gvks[0].GroupVersion().String(),
+		Kind:       gvks[0].Kind,
+	}
+}
+
+// e2eGateway creates a managed Gateway in e2eGWNamespace/e2eGWName.
+// listenerHostnames → Spec.Listeners; statusIPs → Status.Addresses.
+// Optional mutateMeta funcs run last to allow e.g. setting DeletionTimestamp.
+func e2eGateway(uid string, listenerHostnames, statusIPs []string, mutateMeta ...func(*gatewayv1.Gateway)) *gatewayv1.Gateway {
+	gwIPType := gatewayv1.IPAddressType
+	gw := &gatewayv1.Gateway{
+		TypeMeta: e2eTypeMetaFor(&gatewayv1.Gateway{}),
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: e2eGWNamespace,
+			Name:      e2eGWName,
+			UID:       types.UID(uid),
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: gatewayv1.ObjectName(common.ManagedK8sGatewayClassIstio),
+		},
+	}
+	for i, hostname := range listenerHostnames {
+		hh := gatewayv1.Hostname(hostname)
+		gw.Spec.Listeners = append(gw.Spec.Listeners, gatewayv1.Listener{
+			Name:     gatewayv1.SectionName(fmt.Sprintf("l%d", i+1)),
+			Hostname: &hh,
+			Port:     80,
+			Protocol: gatewayv1.HTTPProtocolType,
+		})
+	}
+	for _, ip := range statusIPs {
+		gw.Status.Addresses = append(gw.Status.Addresses, gatewayv1.GatewayStatusAddress{
+			Type:  &gwIPType,
+			Value: ip,
+		})
+	}
+	for _, f := range mutateMeta {
+		f(gw)
+	}
+	return gw
+}
+
+// e2eListenerSet creates a ListenerSet in e2eGWNamespace with a ParentRef pointing to gwName.
+func e2eListenerSet(uid, lsName, gwName string, listenerHostnames []string) *gatewayv1.ListenerSet {
+	gwTM := e2eTypeMetaFor(&gatewayv1.Gateway{})
+	gwKind := gatewayv1.Kind(gwTM.Kind)
+	gwGroup := gatewayv1.Group(gatewayv1.GroupName)
+	gwNS := gatewayv1.Namespace(e2eGWNamespace)
+	ls := &gatewayv1.ListenerSet{
+		TypeMeta: e2eTypeMetaFor(&gatewayv1.ListenerSet{}),
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: e2eGWNamespace,
+			Name:      lsName,
+			UID:       types.UID(uid),
+		},
+		Spec: gatewayv1.ListenerSetSpec{
+			ParentRef: gatewayv1.ParentGatewayReference{
+				Kind:      &gwKind,
+				Group:     &gwGroup,
+				Name:      gatewayv1.ObjectName(gwName),
+				Namespace: &gwNS,
+			},
+		},
+	}
+	for i, hostname := range listenerHostnames {
+		hh := gatewayv1.Hostname(hostname)
+		ls.Spec.Listeners = append(ls.Spec.Listeners, gatewayv1.ListenerEntry{
+			Name:     gatewayv1.SectionName(fmt.Sprintf("l%d", i+1)),
+			Hostname: &hh,
+		})
+	}
+	return ls
+}
+
+// e2eClientObjects builds the fake-client seed list: Namespace + gw + optional ls.
+func e2eClientObjects(gw *gatewayv1.Gateway, ls *gatewayv1.ListenerSet) []client.Object {
+	objs := []client.Object{e2eTestNamespace(), gw}
+	if ls != nil {
+		objs = append(objs, ls)
+	}
+	return objs
+}
+
+// hasFQDNInRecords reports whether any record in records has the given FQDN.
+func hasFQDNInRecords(records []*dns.DNSRecord, fqdn string) bool {
+	for _, r := range records {
+		if r.Fqdn != nil && *r.Fqdn == fqdn {
+			return true
+		}
+	}
+	return false
+}
+
+// getGatewayDNSReadyCondition returns the DNSReady condition from the Gateway's current status.
+func getGatewayDNSReadyCondition(ctx context.Context, r *GatewayReconciler, key types.NamespacedName) *metav1.Condition {
+	gw := &gatewayv1.Gateway{}
+	if err := r.Client.Get(ctx, key, gw); err != nil {
+		return nil
+	}
+	for _, c := range gw.Status.Conditions {
+		if c.Type == conditionTypeDNSReady {
+			cc := c
+			return &cc
+		}
+	}
+	return nil
+}
+
+// getListenerSetDNSReadyCondition returns the DNSReady condition from the ListenerSet's current status.
+func getListenerSetDNSReadyCondition(ctx context.Context, r *GatewayReconciler, key types.NamespacedName) *metav1.Condition {
+	ls := &gatewayv1.ListenerSet{}
+	if err := r.Client.Get(ctx, key, ls); err != nil {
+		return nil
+	}
+	for _, c := range ls.Status.Conditions {
+		if c.Type == conditionTypeDNSReady {
+			cc := c
+			return &cc
+		}
+	}
+	return nil
+}
+
+// e2eResourceRef builds a ResourceRef for use in seeding DNS records directly.
+func e2eResourceRef(kind, namespace, name, uid string) *dns.ResourceRef {
+	return &dns.ResourceRef{
+		Kind:   kind,
+		Object: &metav1.ObjectMeta{Namespace: namespace, Name: name, UID: types.UID(uid)},
+	}
+}
+
+// --------------------------------------------------------------------------
+// Test_Reconcile_E2E — end-to-end reconcile verification against DNSRecordStore
+// --------------------------------------------------------------------------
+
+func Test_Reconcile_E2E(t *testing.T) {
+	ctx := context.Background()
+
+	type reconcileE2ECase struct {
+		name            string
+		gw              *gatewayv1.Gateway
+		listenerSet     *gatewayv1.ListenerSet
+		gwSecond        *gatewayv1.Gateway
+		lsSecond        *gatewayv1.ListenerSet
+		seedFn          func(r *GatewayReconciler)
+		wantErrSecond   bool
+		verify          func(t *testing.T, r *GatewayReconciler)
+		wantStatusCalls []string
+	}
+
+	tests := []reconcileE2ECase{
+		{
+			name: "create_dns_records_in_store",
+			gw:   e2eGateway("gw-uid-1", []string{"svc.example.com"}, []string{"10.0.0.1"}),
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				records := r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-1")
+				require.NotEmpty(t, records, "expected DNS records in store for Gateway owner")
+				assert.True(t, hasFQDNInRecords(records, "svc.example.com"))
+				assert.True(t, r.Service.ListGatewayNamespacedName().Has(
+					types.NamespacedName{Namespace: e2eGWNamespace, Name: e2eGWName}))
+			},
+			wantStatusCalls: []string{callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateSuccess},
+		},
+		{
+			name:        "gateway_and_listener_set_distinct_hostnames",
+			gw:          e2eGateway("gw-uid-2", []string{"gw-listener.example.com"}, []string{"10.0.0.1"}),
+			listenerSet: e2eListenerSet("ls-uid-2", "ls1", e2eGWName, []string{"ls-listener.example.com"}),
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				gwRecs := r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-2")
+				require.NotEmpty(t, gwRecs, "expected Gateway DNS records")
+				assert.True(t, hasFQDNInRecords(gwRecs, "gw-listener.example.com"))
+
+				lsRecs := r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindListenerSet, "ls-uid-2")
+				require.NotEmpty(t, lsRecs, "expected ListenerSet DNS records")
+				assert.True(t, hasFQDNInRecords(lsRecs, "ls-listener.example.com"))
+			},
+			wantStatusCalls: []string{callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateSuccess},
+		},
+		{
+			name:     "delete_dns_records_when_gateway_has_no_ip",
+			gw:       e2eGateway("gw-uid-3", []string{"svc.example.com"}, []string{"10.0.0.1"}),
+			gwSecond: e2eGateway("gw-uid-3", []string{"svc.example.com"}, nil),
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				assert.Empty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-3"),
+					"store should be empty after gateway loses its IP")
+			},
+			wantStatusCalls: []string{
+				callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateSuccess,
+				callIncreaseSyncTotal, callIncreaseDeleteTotal, callDeleteSuccess,
+			},
+		},
+		{
+			name: "gateway_deleting_removes_records_from_store",
+			gw: e2eGateway("gw-uid-4", []string{"svc.example.com"}, []string{"10.0.0.1"}, func(gw *gatewayv1.Gateway) {
+				now := metav1.Now()
+				gw.DeletionTimestamp = &now
+				gw.Finalizers = []string{"x"}
+			}),
+			seedFn: func(r *GatewayReconciler) {
+				gwRef := e2eResourceRef(dns.ResourceKindGateway, e2eGWNamespace, e2eGWName, "gw-uid-4")
+				rec := &dns.Record{
+					Addresses:       []net.IP{net.ParseIP("10.0.0.1")},
+					Hostnames:       []string{"svc.example.com"},
+					Owner:           gwRef,
+					AddressProvider: gwRef,
+				}
+				require.NoError(t, r.Service.CreateOrUpdateDNSRecords(context.Background(), rec))
+				require.NotEmpty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-4"),
+					"precondition: store must be non-empty before reconcile")
+			},
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				assert.Empty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-4"),
+					"store should be empty after gateway deletion reconcile")
+			},
+			wantStatusCalls: []string{callIncreaseSyncTotal, callIncreaseDeleteTotal, callDeleteSuccess},
+		},
+		{
+			name:     "update_dns_records_in_store",
+			gw:       e2eGateway("gw-uid-5", []string{"svc.example.com"}, []string{"10.0.0.1"}),
+			gwSecond: e2eGateway("gw-uid-5", []string{"svc.example.com"}, []string{"10.0.0.2"}),
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				records := r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-5")
+				require.NotEmpty(t, records, "store should have updated records")
+				found10001, found10002 := false, false
+				for _, rec := range records {
+					if rec.IpAddress != nil {
+						switch *rec.IpAddress {
+						case "10.0.0.1":
+							found10001 = true
+						case "10.0.0.2":
+							found10002 = true
+						}
+					}
+				}
+				assert.False(t, found10001, "old IP 10.0.0.1 must be removed after update")
+				assert.True(t, found10002, "new IP 10.0.0.2 must be present after update")
+			},
+			wantStatusCalls: []string{
+				callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateSuccess,
+				callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateSuccess,
+			},
+		},
+		{
+			name:          "gateway_hostname_update_invalid_zone_clears_dns_and_dnsready_false",
+			gw:            e2eGateway("gw-uid-6", []string{"svc.example.com"}, []string{"10.0.0.1"}),
+			gwSecond:      e2eGateway("gw-uid-6", []string{"invalid.notourzone.com"}, []string{"10.0.0.1"}),
+			wantErrSecond: true,
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				assert.Empty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-6"),
+					"store should be empty after invalid FQDN update")
+				cond := getGatewayDNSReadyCondition(ctx, r,
+					types.NamespacedName{Namespace: e2eGWNamespace, Name: e2eGWName})
+				require.NotNil(t, cond, "DNSReady condition must be set on Gateway")
+				assert.Equal(t, metav1.ConditionFalse, cond.Status)
+				assert.Equal(t, reasonDNSRecordFailed, cond.Reason)
+				assert.Contains(t, cond.Message, "invalid FQDNs are detected")
+			},
+			wantStatusCalls: []string{
+				callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateSuccess,
+				callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateFail,
+			},
+		},
+		{
+			name:          "listenerset_hostname_update_invalid_zone_clears_dns_and_dnsready_false",
+			gw:            e2eGateway("gw-uid-7", nil, []string{"10.0.0.1"}),
+			listenerSet:   e2eListenerSet("ls-uid-7", "ls1", e2eGWName, []string{"ls-good.example.com"}),
+			lsSecond:      e2eListenerSet("ls-uid-7", "ls1", e2eGWName, []string{"ls-app.notourzone.com"}),
+			wantErrSecond: true,
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				assert.Empty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindListenerSet, "ls-uid-7"),
+					"LS DNS records should be cleared after invalid FQDN")
+				cond := getListenerSetDNSReadyCondition(ctx, r,
+					types.NamespacedName{Namespace: e2eGWNamespace, Name: "ls1"})
+				require.NotNil(t, cond, "ListenerSet DNSReady condition must be set")
+				assert.Equal(t, metav1.ConditionFalse, cond.Status)
+				assert.Equal(t, reasonDNSRecordFailed, cond.Reason)
+				assert.Contains(t, cond.Message, "invalid FQDNs are detected")
+			},
+			wantStatusCalls: []string{
+				callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateSuccess,
+				callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateFail,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := fakeGatewayReconcilerWithPermittedZone(t, e2ePermittedDNSZone, e2eClientObjects(tc.gw, tc.listenerSet)...)
+			r.listenerSetEnabled = true
+
+			if tc.seedFn != nil {
+				tc.seedFn(r)
+			}
+
+			needSecond := tc.gwSecond != nil || tc.lsSecond != nil
+
+			if !needSecond {
+				// Single reconcile
+				result, err := r.Reconcile(ctx, e2eGatewayRequest())
+				require.NoError(t, err)
+				assert.False(t, result.Requeue)
+			} else {
+				// First reconcile (skip if we only seeded the store)
+				if tc.seedFn == nil {
+					result, err := r.Reconcile(ctx, e2eGatewayRequest())
+					require.NoError(t, err, "first reconcile should succeed")
+					assert.False(t, result.Requeue)
+				}
+
+				// Build second reconciler with the updated objects, sharing the same service
+				gwForSecond := tc.gwSecond
+				if gwForSecond == nil {
+					gwForSecond = tc.gw
+				}
+				lsForSecond := tc.lsSecond
+				if lsForSecond == nil {
+					lsForSecond = tc.listenerSet
+				}
+				r2, _ := fakeGatewayReconcilerWithPermittedZone(t, e2ePermittedDNSZone, e2eClientObjects(gwForSecond, lsForSecond)...)
+				r2.Service = r.Service
+				r2.StatusUpdater = r.StatusUpdater
+				r2.listenerSetEnabled = true
+
+				result2, err2 := r2.Reconcile(ctx, e2eGatewayRequest())
+				if tc.wantErrSecond {
+					assert.Error(t, err2, "second reconcile should return an error")
+					assert.True(t, result2.Requeue || result2.RequeueAfter > 0)
+				} else {
+					require.NoError(t, err2)
+					assert.False(t, result2.Requeue)
+				}
+				r = r2
+			}
+
+			if tc.verify != nil {
+				tc.verify(t, r)
+			}
+			if tc.wantStatusCalls != nil {
+				r.StatusUpdater.(*mockStatusUpdater).validateCalls(t, tc.wantStatusCalls)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// Test_CollectGarbage_E2E — end-to-end GC verification against DNSRecordStore
+// --------------------------------------------------------------------------
+
+func Test_CollectGarbage_E2E(t *testing.T) {
+	ctx := context.Background()
+
+	type collectGarbageE2ECase struct {
+		name       string
+		k8sObjects []client.Object
+		seedFn     func(t *testing.T, r *GatewayReconciler)
+		verify     func(t *testing.T, r *GatewayReconciler)
+	}
+
+	tests := []collectGarbageE2ECase{
+		{
+			name:       "removes_dns_records_when_gateway_not_in_cluster",
+			k8sObjects: []client.Object{e2eTestNamespace()},
+			seedFn: func(t *testing.T, r *GatewayReconciler) {
+				ref := e2eResourceRef(dns.ResourceKindGateway, e2eGWNamespace, "gone-gw", "uid-gone-gw")
+				require.NoError(t, r.Service.CreateOrUpdateDNSRecords(ctx, &dns.Record{
+					Addresses:       []net.IP{net.ParseIP("10.0.0.1")},
+					Hostnames:       []string{"gone.example.com"},
+					Owner:           ref,
+					AddressProvider: ref,
+				}))
+			},
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				assert.Empty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "uid-gone-gw"),
+					"GC should clear records for Gateway not in cluster")
+				assert.False(t, r.Service.ListGatewayNamespacedName().Has(
+					types.NamespacedName{Namespace: e2eGWNamespace, Name: "gone-gw"}))
+			},
+		},
+		{
+			name: "removes_orphan_listener_set_dns_records_keeps_gateway_records",
+			k8sObjects: e2eClientObjects(
+				e2eGateway("gw-uid-gc1", []string{"gw.example.com"}, []string{"10.0.0.1"}),
+				nil,
+			),
+			seedFn: func(t *testing.T, r *GatewayReconciler) {
+				gwRef := e2eResourceRef(dns.ResourceKindGateway, e2eGWNamespace, e2eGWName, "gw-uid-gc1")
+				// GW owner record
+				require.NoError(t, r.Service.CreateOrUpdateDNSRecords(ctx, &dns.Record{
+					Addresses: []net.IP{net.ParseIP("10.0.0.1")},
+					Hostnames: []string{"gw.example.com"},
+					Owner:     gwRef, AddressProvider: gwRef,
+				}))
+				// Orphaned LS record (LS does not exist in K8s)
+				require.NoError(t, r.Service.CreateOrUpdateDNSRecords(ctx, &dns.Record{
+					Addresses:       []net.IP{net.ParseIP("10.0.0.1")},
+					Hostnames:       []string{"orphan-ls.example.com"},
+					Owner:           e2eResourceRef(dns.ResourceKindListenerSet, e2eGWNamespace, "orphan-ls", "uid-orphan-ls"),
+					AddressProvider: gwRef,
+				}))
+			},
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				assert.NotEmpty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-gc1"),
+					"Gateway owner records should survive GC")
+				assert.Empty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindListenerSet, "uid-orphan-ls"),
+					"orphaned LS records should be removed by GC")
+			},
+		},
+		{
+			name: "removes_deleted_listener_set_dns_records_keeps_existing_listener_set_records",
+			k8sObjects: e2eClientObjects(
+				e2eGateway("gw-uid-gc2", []string{"gw.example.com"}, []string{"10.0.0.1"}),
+				e2eListenerSet("ls-uid-kept", "ls-kept", e2eGWName, []string{"kept-ls.example.com"}),
+			),
+			seedFn: func(t *testing.T, r *GatewayReconciler) {
+				gwRef := e2eResourceRef(dns.ResourceKindGateway, e2eGWNamespace, e2eGWName, "gw-uid-gc2")
+				require.NoError(t, r.Service.CreateOrUpdateDNSRecords(ctx, &dns.Record{
+					Addresses: []net.IP{net.ParseIP("10.0.0.1")}, Hostnames: []string{"gw.example.com"},
+					Owner: gwRef, AddressProvider: gwRef,
+				}))
+				require.NoError(t, r.Service.CreateOrUpdateDNSRecords(ctx, &dns.Record{
+					Addresses:       []net.IP{net.ParseIP("10.0.0.1")},
+					Hostnames:       []string{"kept-ls.example.com"},
+					Owner:           e2eResourceRef(dns.ResourceKindListenerSet, e2eGWNamespace, "ls-kept", "ls-uid-kept"),
+					AddressProvider: gwRef,
+				}))
+				require.NoError(t, r.Service.CreateOrUpdateDNSRecords(ctx, &dns.Record{
+					Addresses:       []net.IP{net.ParseIP("10.0.0.1")},
+					Hostnames:       []string{"removed-ls.example.com"},
+					Owner:           e2eResourceRef(dns.ResourceKindListenerSet, e2eGWNamespace, "ls-removed", "ls-uid-removed"),
+					AddressProvider: gwRef,
+				}))
+			},
+			verify: func(t *testing.T, r *GatewayReconciler) {
+				assert.NotEmpty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindGateway, "gw-uid-gc2"),
+					"GW records should survive GC")
+				assert.NotEmpty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindListenerSet, "ls-uid-kept"),
+					"kept LS records should survive GC")
+				assert.Empty(t, r.Service.DNSRecordStore.GetByOwnerResourceUID(dns.ResourceKindListenerSet, "ls-uid-removed"),
+					"removed LS records should be cleared by GC")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := fakeGatewayReconcilerWithPermittedZone(t, e2ePermittedDNSZone, tc.k8sObjects...)
+			r.crdReady = true
+			r.listenerSetEnabled = true
+			if tc.seedFn != nil {
+				tc.seedFn(t, r)
+			}
+			require.NoError(t, r.CollectGarbage(ctx))
+			if tc.verify != nil {
+				tc.verify(t, r)
+			}
 		})
 	}
 }

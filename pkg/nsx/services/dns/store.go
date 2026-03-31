@@ -102,6 +102,19 @@ func indexDNSRecordByNamespacedName(obj interface{}) ([]string, error) {
 	}
 }
 
+func indexDNSRecordByFQDN(obj interface{}) ([]string, error) {
+	switch v := obj.(type) {
+	case *DNSRecord:
+		fqdn := v.Fqdn
+		if fqdn != nil {
+			return []string{*v.Fqdn}, nil
+		}
+		return []string{}, nil
+	default:
+		return nil, errors.New("indexDNSRecordByOwnerUID doesn't support unknown type")
+	}
+}
+
 func dnsRecordOwnerKey(createdFor string, ownerUID string) string {
 	return fmt.Sprintf("%s/%s", createdFor, ownerUID)
 }
@@ -113,6 +126,7 @@ func dnsRecordGatewayKey(gwNamespace, gwName string) string {
 const (
 	indexKeyDNSRecordOwnerUID       = "ownerUID"
 	indexKeyDNSRecordNamespacedName = "gatewayNamespacedName"
+	indexKeyDNSRecordFQDN           = "recordFQDN"
 )
 
 func (s *DNSRecordStore) Apply(i interface{}) error {
@@ -194,6 +208,7 @@ func BuildDNSRecordStore() *DNSRecordStore {
 			Indexer: cache.NewIndexer(dnsRecordKeyFunc, cache.Indexers{
 				indexKeyDNSRecordOwnerUID:       indexDNSRecordByOwnerUID,
 				indexKeyDNSRecordNamespacedName: indexDNSRecordByNamespacedName,
+				indexKeyDNSRecordFQDN:           indexDNSRecordByFQDN,
 			}),
 			BindingType: nil,
 		},

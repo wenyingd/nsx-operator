@@ -100,6 +100,8 @@ const (
 	TagScopeGatewayName                string = "nsx-op/gateway_name"
 	TagScopeGatewayNamespace           string = "nsx-op/gateway_namespace"
 	TagScopeServiceUID                 string = "nsx-op/service_uid"
+	TagScopeServiceName                string = "nsx-op/service_name"
+	TagScopeForSupervisorService       string = "nsx-op/for_supervisor_service"
 	TagValueDNSRecordForGateway        string = "gateway"
 	TagValueDNSRecordForListenerSet    string = "listenerset"
 	TagValueDNSRecordForService        string = "service"

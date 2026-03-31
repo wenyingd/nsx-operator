@@ -9,12 +9,37 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmware/vsphere-automation-sdk-go/services/nsxt-mp/nsx/model"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 )
 
 func strPtr(s string) *string { return &s }
+
+// makeOwnerRef constructs a ResourceRef for the given kind, namespace, name and UID.
+func makeOwnerRef(kind, namespace, name, uid string) *ResourceRef {
+	return &ResourceRef{
+		Kind:   kind,
+		Object: &metav1.ObjectMeta{Namespace: namespace, Name: name, UID: types.UID(uid)},
+	}
+}
+
+// makeDNSRecordInZone creates a Gateway-owned DNSRecord with Fqdn and DnsZonePath set.
+// Used to seed the store for duplicate-FQDN detection tests.
+func makeDNSRecordInZone(id, fqdn, zonePath, ownerUID, ownerNS, ownerName string) *DNSRecord {
+	return &DNSRecord{
+		Id:          strPtr(id),
+		Fqdn:        strPtr(fqdn),
+		DnsZonePath: strPtr(zonePath),
+		Tags: []model.Tag{
+			{Scope: strPtr(common.TagScopeDNSRecordFor), Tag: strPtr(common.TagValueDNSRecordForGateway)},
+			{Scope: strPtr(common.TagScopeGatewayUID), Tag: strPtr(ownerUID)},
+			{Scope: strPtr(common.TagScopeGatewayNamespace), Tag: strPtr(ownerNS)},
+			{Scope: strPtr(common.TagScopeGatewayName), Tag: strPtr(ownerName)},
+		},
+	}
+}
 
 // makeRecordWithOwnerTags creates a DNSRecord owned by a ListenerSet, also indexed to default/gw1.
 func makeRecordWithOwnerTags(id, ns, name, uid string) *DNSRecord {
@@ -175,4 +200,54 @@ func Test_ListGatewayNamespacedName(t *testing.T) {
 	svc := &DNSRecordService{DNSRecordStore: store}
 	got := svc.ListGatewayNamespacedName()
 	assert.True(t, got.Has(types.NamespacedName{Namespace: "default", Name: "gw1"}))
+}
+
+func Test_indexDNSRecordByOwnerUID_ErrorPaths(t *testing.T) {
+	t.Run("unknown type returns error", func(t *testing.T) {
+		_, err := indexDNSRecordByOwnerUID("not-a-record")
+		assert.Error(t, err)
+	})
+	t.Run("record with no owner tags returns empty keys", func(t *testing.T) {
+		rec := &DNSRecord{Id: strPtr("rec-1")}
+		keys, err := indexDNSRecordByOwnerUID(rec)
+		assert.NoError(t, err)
+		assert.Empty(t, keys)
+	})
+}
+
+func Test_indexDNSRecordByNamespacedName_ErrorPaths(t *testing.T) {
+	t.Run("unknown type returns error", func(t *testing.T) {
+		_, err := indexDNSRecordByNamespacedName("not-a-record")
+		assert.Error(t, err)
+	})
+	t.Run("record with no tags returns empty keys", func(t *testing.T) {
+		rec := &DNSRecord{Id: strPtr("rec-1")}
+		keys, err := indexDNSRecordByNamespacedName(rec)
+		assert.NoError(t, err)
+		assert.Empty(t, keys)
+	})
+	t.Run("ListenerSet owner missing gateway name tags returns empty", func(t *testing.T) {
+		rec := &DNSRecord{
+			Id: strPtr("rec-1"),
+			Tags: []model.Tag{
+				{Scope: strPtr(common.TagScopeDNSRecordFor), Tag: strPtr(common.TagValueDNSRecordForListenerSet)},
+				// gateway name/namespace tags intentionally omitted
+			},
+		}
+		keys, err := indexDNSRecordByNamespacedName(rec)
+		assert.NoError(t, err)
+		assert.Empty(t, keys)
+	})
+	t.Run("Service owner returns empty keys (not indexed by gateway)", func(t *testing.T) {
+		rec := &DNSRecord{
+			Id: strPtr("rec-1"),
+			Tags: []model.Tag{
+				{Scope: strPtr(common.TagScopeDNSRecordFor), Tag: strPtr(common.TagValueDNSRecordForService)},
+				{Scope: strPtr(common.TagScopeServiceUID), Tag: strPtr("svc-uid-1")},
+			},
+		}
+		keys, err := indexDNSRecordByNamespacedName(rec)
+		assert.NoError(t, err)
+		assert.Empty(t, keys)
+	})
 }
