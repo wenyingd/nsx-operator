@@ -95,6 +95,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		log.Info("Finished reconciling Gateway", "Gateway", req.NamespacedName, "duration(ms)", time.Since(startTime).Milliseconds())
 	}()
 
+	log.Debug("Reconcile started", "Gateway", req.NamespacedName)
 	r.StatusUpdater.IncreaseSyncTotal()
 	gw := &gatewayv1.Gateway{}
 	if err := r.Client.Get(ctx, req.NamespacedName, gw); err != nil {
@@ -107,6 +108,9 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		log.Error(err, "Failed to fetch Gateway", "Gateway", req.NamespacedName)
 		return common.ResultRequeueAfter10sec, err
 	}
+
+	log.Debug("Gateway loaded", "Gateway", req.NamespacedName, "class", gw.Spec.GatewayClassName,
+		"hasDeletionTimestamp", !gw.DeletionTimestamp.IsZero(), "addressCount", len(gw.Status.Addresses), "listenerCount", len(gw.Spec.Listeners))
 
 	if !shouldProcessGateway(gw) {
 		// Gateway is no longer in a managed GatewayClass (e.g. class changed away from managed).
@@ -146,14 +150,22 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			lastErr = updateErr
 		}
 
+		log.Debug("DNS record upsert", "Gateway", req.NamespacedName, "ownerKind", rec.Owner.Kind,
+			"owner", rec.Owner.GetNamespace()+"/"+rec.Owner.GetName(), "err", updateErr,
+			"addresses", dnsDesiredAddressesString(rec.Addresses), "hostnames", rec.Hostnames)
+
 		// Update resource conditions.
 		r.updateDNSRecordCondition(ctx, rec.Owner, updateErr)
 	}
 
 	// Delete the existing DNS records on the current Gateway but the owner resource does not exist.
+	orphaned := r.Service.ListOrphanedDNSRecordsInGateway(gw.Namespace, gw.Name, existingOwners)
 	delErr := r.Service.DeleteOrphanedDNSRecordsInGateway(ctx, gw.Namespace, gw.Name, existingOwners)
 	if delErr != nil {
 		log.Error(delErr, "Failed to delete the orphaned DNS records")
+	} else if len(orphaned) > 0 {
+		log.Debug("deleted orphaned DNS records", "Gateway", req.NamespacedName, "recordCount", len(orphaned),
+			"records", nsxDNSRecordDebugLines(orphaned))
 	}
 
 	if lastErr != nil || delErr != nil {
@@ -171,10 +183,15 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 // deleteAllDNSRecords removes all DNS records for gw, updating metrics regardless of outcome.
 func (r *GatewayReconciler) deleteAllDNSRecords(ctx context.Context, gw *gatewayv1.Gateway, req ctrl.Request) (ctrl.Result, error) {
 	r.StatusUpdater.IncreaseDeleteTotal()
+	toRemove := r.Service.ListDNSRecordsInGateway(gw.Namespace, gw.Name)
 	if err := r.Service.DeleteAllDNSRecordsInGateway(ctx, gw.Namespace, gw.Name); err != nil {
 		r.StatusUpdater.DeleteFail(req.NamespacedName, gw, err)
 		log.Error(err, "Failed to delete DNS records for Gateway", "Gateway", req.NamespacedName)
 		return common.ResultRequeueAfter10sec, err
+	}
+	if len(toRemove) > 0 {
+		log.Debug("deleted all DNS records for Gateway", "Gateway", req.NamespacedName, "recordCount", len(toRemove),
+			"records", nsxDNSRecordDebugLines(toRemove))
 	}
 	r.StatusUpdater.DeleteSuccess(req.NamespacedName, gw)
 	return ResultNormal, nil
@@ -194,6 +211,7 @@ var predicateFuncsGateway = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
 		oldObj := e.ObjectOld.(*gatewayv1.Gateway)
 		newObj := e.ObjectNew.(*gatewayv1.Gateway)
+		log.Debug("Receive K8s Gateway update event", "Name", oldObj.Name, "Namespace", oldObj.Namespace)
 		// GatewayClass transition (managed ↔ unmanaged): reconcile to create or delete DNS records.
 		if string(oldObj.Spec.GatewayClassName) != string(newObj.Spec.GatewayClassName) {
 			return shouldProcessGateway(oldObj) || shouldProcessGateway(newObj)
@@ -481,6 +499,7 @@ func (r *GatewayReconciler) CollectGarbage(ctx context.Context) error {
 		return nil
 	}
 	cachedGatewaySet := r.Service.ListGatewayNamespacedName()
+	log.Debug("Gateway CollectGarbage started", "cachedGateways", len(cachedGatewaySet), "listenerSetEnabled", r.listenerSetEnabled)
 	gwList := gatewayv1.GatewayList{}
 	err := r.Client.List(ctx, &gwList)
 	if err != nil {
@@ -503,12 +522,17 @@ func (r *GatewayReconciler) CollectGarbage(ctx context.Context) error {
 		// Delete all the DNS records if the corresponding Gateway does not exist.
 		if !found {
 			log.Info("GC collected nsx DNS records for Gateway", "Gateway", elem.String())
+			toRemove := r.Service.ListDNSRecordsInGateway(elem.Namespace, elem.Name)
 			if err = r.Service.DeleteAllDNSRecordsInGateway(ctx, elem.Namespace, elem.Name); err != nil {
 				r.StatusUpdater.DeleteFail(elem, nil, err)
 				log.Error(err, "Failed to delete nsx DNS records for Gateway", "Gateway", elem.String())
 				errList = append(errList, err)
 			} else {
 				r.StatusUpdater.DeleteSuccess(elem, nil)
+				if len(toRemove) > 0 {
+					log.Debug("GC deleted all DNS records for missing Gateway", "Gateway", elem.String(), "recordCount", len(toRemove),
+						"records", nsxDNSRecordDebugLines(toRemove))
+				}
 			}
 		} else {
 			existingOwners := make([]*dns.ResourceRef, 0)
@@ -532,10 +556,14 @@ func (r *GatewayReconciler) CollectGarbage(ctx context.Context) error {
 			}
 
 			// Delete the DNS records configured on the given Gateway but owner does not exist.
+			orphaned := r.Service.ListOrphanedDNSRecordsInGateway(gwCR.Namespace, gwCR.Name, existingOwners)
 			if err := r.Service.DeleteOrphanedDNSRecordsInGateway(ctx, gwCR.Namespace, gwCR.Name, existingOwners); err != nil {
 				r.StatusUpdater.DeleteFail(elem, nil, err)
 				log.Error(err, "Failed to delete nsx DNS records attached to Gateway without owner", "Gateway", elem)
 				errList = append(errList, err)
+			} else if len(orphaned) > 0 {
+				log.Debug("GC deleted orphaned DNS records", "Gateway", elem.String(), "recordCount", len(orphaned),
+					"records", nsxDNSRecordDebugLines(orphaned))
 			}
 		}
 	}
@@ -591,12 +619,66 @@ func (r *GatewayReconciler) StartController(mgr ctrl.Manager, _ webhook.Server) 
 
 	r.listenerSetEnabled = listenerSetExists
 	r.crdReady = true
+	log.Debug("Gateway StartController: Gateway API present", "listenerSetEnabled", listenerSetExists)
 	if err = r.setupWithManager(mgr); err != nil {
 		log.Error(err, "Failed to create controller", "controller", "Gateway")
 		return err
 	}
 	go common.GenericGarbageCollector(make(chan bool), servicecommon.GCInterval, r.CollectGarbage)
 	return nil
+}
+
+// dnsDesiredAddressesString formats desired Record IP addresses for debug logs.
+func dnsDesiredAddressesString(ips []net.IP) []string {
+	if len(ips) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if ip != nil {
+			out = append(out, ip.String())
+		}
+	}
+	return out
+}
+
+// nsxDNSRecordDebugLines returns one human-readable summary string per NSX store entry for debug logs.
+func nsxDNSRecordDebugLines(records []*dns.DNSRecord) []string {
+	if len(records) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(records))
+	for _, rec := range records {
+		if rec == nil {
+			out = append(out, "<nil>")
+			continue
+		}
+		var parts []string
+		if rec.Id != nil && *rec.Id != "" {
+			parts = append(parts, "id="+*rec.Id)
+		}
+		if rec.DisplayName != nil && *rec.DisplayName != "" {
+			parts = append(parts, "displayName="+*rec.DisplayName)
+		}
+		if rec.Fqdn != nil && *rec.Fqdn != "" {
+			parts = append(parts, "fqdn="+*rec.Fqdn)
+		}
+		if rec.IpAddress != nil && *rec.IpAddress != "" {
+			parts = append(parts, "ip="+*rec.IpAddress)
+		}
+		if rec.RecordType != nil && *rec.RecordType != "" {
+			parts = append(parts, "type="+*rec.RecordType)
+		}
+		if len(rec.RecordValues) > 0 {
+			parts = append(parts, "recordValues="+strings.Join(rec.RecordValues, ","))
+		}
+		if len(parts) == 0 {
+			out = append(out, "{}")
+		} else {
+			out = append(out, strings.Join(parts, " "))
+		}
+	}
+	return out
 }
 
 func NewGatewayReconciler(mgr ctrl.Manager, service *dns.DNSRecordService) *GatewayReconciler {

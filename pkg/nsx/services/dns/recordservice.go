@@ -45,8 +45,16 @@ func (s *DNSRecordService) DeleteAllDNSRecordsInGateway(ctx context.Context, gwN
 	return s.deleteDNSRecords(ctx, dnsRecords)
 }
 
-func (s *DNSRecordService) DeleteOrphanedDNSRecordsInGateway(ctx context.Context, gwNamespace, gwName string, desiredOwners []*ResourceRef) error {
-	dnsRecords := s.DNSRecordStore.GetByIndex(indexKeyDNSRecordNamespacedName, dnsRecordGatewayKey(gwNamespace, gwName))
+// ListDNSRecordsInGateway returns NSX DNS records in the local store tagged for the given Gateway.
+func (s *DNSRecordService) ListDNSRecordsInGateway(gwNamespace, gwName string) []*DNSRecord {
+	if s == nil || s.DNSRecordStore == nil {
+		return nil
+	}
+	return s.DNSRecordStore.GetByIndex(indexKeyDNSRecordNamespacedName, dnsRecordGatewayKey(gwNamespace, gwName))
+}
+
+func (s *DNSRecordService) listOrphanedDNSRecordsInGateway(gwNamespace, gwName string, desiredOwners []*ResourceRef) []*DNSRecord {
+	dnsRecords := s.ListDNSRecordsInGateway(gwNamespace, gwName)
 	if len(dnsRecords) == 0 {
 		return nil
 	}
@@ -65,6 +73,20 @@ func (s *DNSRecordService) DeleteOrphanedDNSRecordsInGateway(ctx context.Context
 			orphaned = append(orphaned, rec)
 		}
 	}
+	return orphaned
+}
+
+// ListOrphanedDNSRecordsInGateway returns store entries that would be removed by DeleteOrphanedDNSRecordsInGateway
+// (same selection rules; intended for debug logging before delete).
+func (s *DNSRecordService) ListOrphanedDNSRecordsInGateway(gwNamespace, gwName string, desiredOwners []*ResourceRef) []*DNSRecord {
+	if s == nil {
+		return nil
+	}
+	return s.listOrphanedDNSRecordsInGateway(gwNamespace, gwName, desiredOwners)
+}
+
+func (s *DNSRecordService) DeleteOrphanedDNSRecordsInGateway(ctx context.Context, gwNamespace, gwName string, desiredOwners []*ResourceRef) error {
+	orphaned := s.listOrphanedDNSRecordsInGateway(gwNamespace, gwName, desiredOwners)
 	return s.deleteDNSRecords(ctx, orphaned)
 }
 
@@ -86,12 +108,6 @@ func (s *DNSRecordService) deleteDNSRecords(ctx context.Context, records []*DNSR
 		return nil
 	}
 
-	// Copy each record before setting MarkedForDelete.  GetByIndex returns
-	// direct pointers into cache.Indexer; mutating them in place races with
-	// concurrent Reconcile goroutines or the GC goroutine that may hold the
-	// same pointer.  The copies share the same Id/Tags (read-only after
-	// creation), so the store's keyFunc and index functions work correctly on
-	// the copies.
 	toDelete := make([]*DNSRecord, len(records))
 	for i, rec := range records {
 		cp := *rec
