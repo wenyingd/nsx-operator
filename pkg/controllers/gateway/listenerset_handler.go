@@ -37,25 +37,31 @@ func (r *GatewayReconciler) listenerSetEnqueueHandler() handler.EventHandler {
 }
 
 func (e *enqueueManagedGatewayForListenerSet) Create(ctx context.Context, evt event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	log.Debug("ListenerSet watch: Create", "namespace", evt.Object.GetNamespace(), "name", evt.Object.GetName())
 	e.enqueue(ctx, evt.Object, q)
 }
 
 func (e *enqueueManagedGatewayForListenerSet) Update(ctx context.Context, evt event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	log.Debug("ListenerSet watch: Update", "oldNamespace", evt.ObjectOld.GetNamespace(), "oldName", evt.ObjectOld.GetName(),
+		"newNamespace", evt.ObjectNew.GetNamespace(), "newName", evt.ObjectNew.GetName())
 	e.enqueue(ctx, evt.ObjectOld, q)
 	e.enqueue(ctx, evt.ObjectNew, q)
 }
 
 func (e *enqueueManagedGatewayForListenerSet) Delete(ctx context.Context, evt event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	log.Debug("ListenerSet watch: Delete", "namespace", evt.Object.GetNamespace(), "name", evt.Object.GetName())
 	e.enqueue(ctx, evt.Object, q)
 }
 
 func (e *enqueueManagedGatewayForListenerSet) Generic(ctx context.Context, evt event.GenericEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	log.Debug("ListenerSet watch: Generic", "namespace", evt.Object.GetNamespace(), "name", evt.Object.GetName())
 	e.enqueue(ctx, evt.Object, q)
 }
 
 func (e *enqueueManagedGatewayForListenerSet) enqueue(ctx context.Context, obj client.Object, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	parentGateway := findParentGatewayFromListenerSet(obj)
 	if parentGateway == nil {
+		log.Debug("ListenerSet enqueue skipped: no parent Gateway ref", "listenerSet", obj.GetNamespace()+"/"+obj.GetName())
 		return
 	}
 	gw := &gatewayv1.Gateway{}
@@ -64,8 +70,10 @@ func (e *enqueueManagedGatewayForListenerSet) enqueue(ctx context.Context, obj c
 		return
 	}
 	if !shouldProcessGateway(gw) {
+		log.Debug("ListenerSet enqueue skipped: parent Gateway not managed", "Gateway", parentGateway.String(), "class", gw.Spec.GatewayClassName)
 		return
 	}
+	log.Debug("ListenerSet enqueue: reconcile parent Gateway", "Gateway", parentGateway.String(), "listenerSet", obj.GetNamespace()+"/"+obj.GetName())
 	q.Add(reconcile.Request{NamespacedName: *parentGateway})
 }
 
@@ -128,6 +136,7 @@ var predicateFuncsListenerSet = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
 		oldObj := e.ObjectOld.(*gatewayv1.ListenerSet)
 		newObj := e.ObjectNew.(*gatewayv1.ListenerSet)
+		log.Debug("Receive K8s ListenerSet update event", "Name", oldObj.Name, "Namespace", oldObj.Namespace)
 		oldHostnames := collectHostnamesFromListenerSet(*oldObj)
 		oldGateway := findParentGatewayFromListenerSet(oldObj)
 		newHostnames := collectHostnamesFromListenerSet(*newObj)

@@ -10,12 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
-)
-
-var (
-	log = logger.Log
 )
 
 // DNSRecordService handles validation and configuration of DNS records.
@@ -45,7 +40,7 @@ func (s *DNSRecordService) DeleteAllDNSRecordsInGateway(ctx context.Context, gwN
 	return s.deleteDNSRecords(ctx, dnsRecords)
 }
 
-func (s *DNSRecordService) DeleteOrphanedDNSRecordsInGateway(ctx context.Context, gwNamespace, gwName string, desiredOwners []*ResourceRef) error {
+func (s *DNSRecordService) listOrphanedDNSRecordsInGateway(gwNamespace, gwName string, desiredOwners []*ResourceRef) []*DNSRecord {
 	dnsRecords := s.DNSRecordStore.GetByIndex(indexKeyDNSRecordNamespacedName, dnsRecordGatewayKey(gwNamespace, gwName))
 	if len(dnsRecords) == 0 {
 		return nil
@@ -65,6 +60,11 @@ func (s *DNSRecordService) DeleteOrphanedDNSRecordsInGateway(ctx context.Context
 			orphaned = append(orphaned, rec)
 		}
 	}
+	return orphaned
+}
+
+func (s *DNSRecordService) DeleteOrphanedDNSRecordsInGateway(ctx context.Context, gwNamespace, gwName string, desiredOwners []*ResourceRef) error {
+	orphaned := s.listOrphanedDNSRecordsInGateway(gwNamespace, gwName, desiredOwners)
 	return s.deleteDNSRecords(ctx, orphaned)
 }
 

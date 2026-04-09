@@ -177,13 +177,6 @@ func resourceKindToCreatedFor(kind string) string {
 	}
 }
 
-func ptrStr(p *string) string {
-	if p == nil {
-		return ""
-	}
-	return *p
-}
-
 // BuildDNSRecordStore returns a new DNSRecordStore with default indexers.
 // BindingType is nil; replace when SDK provides model.DNSRecord and use model.DNSRecordBindingType() if needed for TransResourceToStore.
 func BuildDNSRecordStore() *DNSRecordStore {
