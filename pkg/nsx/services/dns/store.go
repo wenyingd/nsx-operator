@@ -67,6 +67,12 @@ func getDNSRecordOwnerKey(record *DNSRecord) string {
 		uids = filterTagBy(record.Tags, common.TagScopeGatewayUID)
 	case common.TagValueDNSRecordForListenerSet:
 		uids = filterTagBy(record.Tags, common.TagScopeListenerSetUID)
+	case common.TagValueDNSRecordForHTTPRoute:
+		uids = filterTagBy(record.Tags, common.TagScopeHTTPRouteUID)
+	case common.TagValueDNSRecordForGRPCRoute:
+		uids = filterTagBy(record.Tags, common.TagScopeGRPCRouteUID)
+	case common.TagValueDNSRecordForTLSRoute:
+		uids = filterTagBy(record.Tags, common.TagScopeTLSRouteUID)
 	case common.TagValueDNSRecordForService:
 		uids = filterTagBy(record.Tags, common.TagScopeServiceUID)
 	}
@@ -88,6 +94,12 @@ func indexDNSRecordByNamespacedName(obj interface{}) ([]string, error) {
 		case common.TagValueDNSRecordForGateway:
 			fallthrough
 		case common.TagValueDNSRecordForListenerSet:
+			fallthrough
+		case common.TagValueDNSRecordForHTTPRoute:
+			fallthrough
+		case common.TagValueDNSRecordForGRPCRoute:
+			fallthrough
+		case common.TagValueDNSRecordForTLSRoute:
 			gwNames := filterTagBy(v.Tags, common.TagScopeGatewayName)
 			gwNamespaces := filterTagBy(v.Tags, common.TagScopeGatewayNamespace)
 			if len(gwNames) == 0 || len(gwNamespaces) == 0 {
@@ -170,6 +182,12 @@ func resourceKindToCreatedFor(kind string) string {
 		return common.TagValueDNSRecordForGateway
 	case ResourceKindListenerSet:
 		return common.TagValueDNSRecordForListenerSet
+	case ResourceKindHTTPRoute:
+		return common.TagValueDNSRecordForHTTPRoute
+	case ResourceKindGRPCRoute:
+		return common.TagValueDNSRecordForGRPCRoute
+	case ResourceKindTLSRoute:
+		return common.TagValueDNSRecordForTLSRoute
 	case ResourceKindService:
 		return common.TagValueDNSRecordForService
 	default:

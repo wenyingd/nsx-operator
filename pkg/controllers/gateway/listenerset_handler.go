@@ -5,76 +5,49 @@ package gateway
 
 import (
 	"context"
-	"slices"
-	"sort"
-	"strings"
+	"fmt"
 
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/dns"
+	extdnssrc "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/source"
 )
 
-// enqueueManagedGatewayForListenerSet maps ListenerSet events to reconcile requests for parent
-// Gateways that use a managed GatewayClass. On Update, the old and new parent references are
-// considered independently: each is enqueued only if that Gateway is managed. If ParentRef moves
-// from a managed Gateway to an unmanaged one, only the former is queued so DNS under the old
-// Gateway can be released; the unmanaged parent is intentionally not queued.
-type enqueueManagedGatewayForListenerSet struct {
-	Client client.Client
-}
-
-var _ handler.EventHandler = (*enqueueManagedGatewayForListenerSet)(nil)
-
 func (r *GatewayReconciler) listenerSetEnqueueHandler() handler.EventHandler {
-	return &enqueueManagedGatewayForListenerSet{Client: r.Client}
+	return handler.EnqueueRequestsFromMapFunc(r.listenerSetToGatewayMapFunc)
 }
 
-func (e *enqueueManagedGatewayForListenerSet) Create(ctx context.Context, evt event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	log.Debug("ListenerSet watch: Create", "namespace", evt.Object.GetNamespace(), "name", evt.Object.GetName())
-	e.enqueue(ctx, evt.Object, q)
-}
-
-func (e *enqueueManagedGatewayForListenerSet) Update(ctx context.Context, evt event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	log.Debug("ListenerSet watch: Update", "oldNamespace", evt.ObjectOld.GetNamespace(), "oldName", evt.ObjectOld.GetName(),
-		"newNamespace", evt.ObjectNew.GetNamespace(), "newName", evt.ObjectNew.GetName())
-	e.enqueue(ctx, evt.ObjectOld, q)
-	e.enqueue(ctx, evt.ObjectNew, q)
-}
-
-func (e *enqueueManagedGatewayForListenerSet) Delete(ctx context.Context, evt event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	log.Debug("ListenerSet watch: Delete", "namespace", evt.Object.GetNamespace(), "name", evt.Object.GetName())
-	e.enqueue(ctx, evt.Object, q)
-}
-
-func (e *enqueueManagedGatewayForListenerSet) Generic(ctx context.Context, evt event.GenericEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	log.Debug("ListenerSet watch: Generic", "namespace", evt.Object.GetNamespace(), "name", evt.Object.GetName())
-	e.enqueue(ctx, evt.Object, q)
-}
-
-func (e *enqueueManagedGatewayForListenerSet) enqueue(ctx context.Context, obj client.Object, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	parentGateway := findParentGatewayFromListenerSet(obj)
-	if parentGateway == nil {
-		log.Debug("ListenerSet enqueue skipped: no parent Gateway ref", "listenerSet", obj.GetNamespace()+"/"+obj.GetName())
-		return
+func (r *GatewayReconciler) listenerSetToGatewayMapFunc(ctx context.Context, obj client.Object) []reconcile.Request {
+	var requests []reconcile.Request
+	ls, ok := obj.(*gatewayv1.ListenerSet)
+	if !ok {
+		return requests
 	}
+
+	parent := findParentGatewayFromListenerSet(ls)
+	if parent == nil {
+		return requests
+	}
+
 	gw := &gatewayv1.Gateway{}
-	if err := e.Client.Get(ctx, *parentGateway, gw); err != nil {
-		log.Error(err, "Failed to fetch the parent Gateway", "Gateway", parentGateway)
-		return
+	if err := r.Client.Get(ctx, *parent, gw); err != nil {
+		log.Error(err, "Failed to fetch the parent Gateway", "Gateway", parent.String())
+		return requests
 	}
+
 	if !shouldProcessGateway(gw) {
-		log.Debug("ListenerSet enqueue skipped: parent Gateway not managed", "Gateway", parentGateway.String(), "class", gw.Spec.GatewayClassName)
-		return
+		log.Debug("Skipping ListenerSet enqueue: Parent Gateway is not managed", "Gateway", parent.String(),
+			"ListenerSet", fmt.Sprintf("%s/%s", ls.Namespace, ls.Name))
+		return requests
 	}
-	log.Debug("ListenerSet enqueue: reconcile parent Gateway", "Gateway", parentGateway.String(), "listenerSet", obj.GetNamespace()+"/"+obj.GetName())
-	q.Add(reconcile.Request{NamespacedName: *parentGateway})
+	log.Debug("ListenerSet enqueue: reconcile parent Gateway", "Gateway", parent.String(),
+		"ListenerSet", fmt.Sprintf("%s/%s", ls.Namespace, ls.Name))
+
+	return append(requests, reconcile.Request{NamespacedName: *parent})
 }
 
 func findParentGatewayFromListenerSet(obj client.Object) *types.NamespacedName {
@@ -108,16 +81,7 @@ func findParentGatewayFromListenerSet(obj client.Object) *types.NamespacedName {
 }
 
 func collectHostnamesFromListenerSet(ls gatewayv1.ListenerSet) []string {
-	var hostnames []string
-	for _, l := range ls.Spec.Listeners {
-		if l.Hostname != nil {
-			h := strings.TrimSpace(string(*l.Hostname))
-			if h != "" {
-				hostnames = append(hostnames, h)
-			}
-		}
-	}
-	return hostnames
+	return extdnssrc.GetDesiredHostnames(&ls, extdnssrc.ListenerSetEntryHostnames(ls.Spec.Listeners))
 }
 
 func listenerSetParentGatewayIndexFunc(obj client.Object) []string {
@@ -128,45 +92,9 @@ func listenerSetParentGatewayIndexFunc(obj client.Object) []string {
 	return []string{parentGateway.String()}
 }
 
-var predicateFuncsListenerSet = predicate.Funcs{
-	CreateFunc: func(e event.CreateEvent) bool {
-		ls := e.Object.(*gatewayv1.ListenerSet)
-		return len(collectHostnamesFromListenerSet(*ls)) > 0
-	},
-	UpdateFunc: func(e event.UpdateEvent) bool {
-		oldObj := e.ObjectOld.(*gatewayv1.ListenerSet)
-		newObj := e.ObjectNew.(*gatewayv1.ListenerSet)
-		log.Debug("Receive K8s ListenerSet update event", "Name", oldObj.Name, "Namespace", oldObj.Namespace)
-		oldHostnames := collectHostnamesFromListenerSet(*oldObj)
-		oldGateway := findParentGatewayFromListenerSet(oldObj)
-		newHostnames := collectHostnamesFromListenerSet(*newObj)
-		newGateway := findParentGatewayFromListenerSet(newObj)
-		if sliceEquals(oldHostnames, newHostnames) && gatewayEquals(oldGateway, newGateway) {
-			return false
-		}
-		return true
-	},
-	DeleteFunc: func(e event.DeleteEvent) bool {
-		return true
-	},
-}
-
 func gatewayEquals(old, new *types.NamespacedName) bool {
 	if old == nil || new == nil {
 		return old == new
 	}
 	return old.String() == new.String()
-}
-
-func sliceEquals(old, new []string) bool {
-	if len(old) != len(new) {
-		return false
-	}
-	oldCopy := append([]string(nil), old...)
-	newCopy := append([]string(nil), new...)
-
-	sort.Strings(oldCopy)
-	sort.Strings(newCopy)
-
-	return slices.Equal(oldCopy, newCopy)
 }

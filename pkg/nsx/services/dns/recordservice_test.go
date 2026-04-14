@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	extdns "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/endpoint"
 )
 
 // newSvc creates a DNSRecordService with a fresh store seeded with the given records.
@@ -22,7 +24,61 @@ func newSvc(recs ...*DNSRecord) *DNSRecordService {
 }
 
 func Test_CreateOrUpdateDNSRecords(t *testing.T) {
-	assert.NoError(t, newSvc().CreateOrUpdateDNSRecords(context.Background(), &Record{}))
+	assert.NoError(t, newSvc().CreateOrUpdateDNSRecords(context.Background(), &OwnerEndpoints{}))
+	assert.NoError(t, newSvc().CreateOrUpdateDNSRecords(context.Background(), nil))
+}
+
+func gatewayOwnerBatch(eps ...*extdns.Endpoint) *OwnerEndpoints {
+	gwMeta := metav1.ObjectMeta{Name: "gw1", Namespace: "ns1", UID: "gw-uid-1"}
+	gwRef := &ResourceRef{Kind: ResourceKindGateway, Object: &gwMeta}
+	return &OwnerEndpoints{
+		AddressProvider: gwRef,
+		Owner:           gwRef,
+		Endpoints:       eps,
+	}
+}
+
+func Test_CreateOrUpdateDNSRecords_gatewayOwnerIndexesStore(t *testing.T) {
+	svc := newSvc()
+	ep := extdns.NewEndpoint("app.example.com", extdns.RecordTypeA, "10.0.0.2")
+	require.NotNil(t, ep)
+	require.NoError(t, svc.CreateOrUpdateDNSRecords(context.Background(), gatewayOwnerBatch(ep)))
+
+	byOwner := svc.DNSRecordStore.GetByOwnerResourceUID(ResourceKindGateway, "gw-uid-1")
+	require.Len(t, byOwner, 1)
+	assert.Equal(t, "app.example.com", *byOwner[0].Fqdn)
+	assert.Equal(t, extdns.RecordTypeA, *byOwner[0].RecordType)
+
+	byGw := svc.DNSRecordStore.GetByIndex(indexKeyDNSRecordNamespacedName, "ns1/gw1")
+	require.Len(t, byGw, 1)
+}
+
+func Test_CreateOrUpdateDNSRecords_removesStaleRecordsForOwner(t *testing.T) {
+	svc := newSvc()
+	require.NoError(t, svc.CreateOrUpdateDNSRecords(context.Background(),
+		gatewayOwnerBatch(extdns.NewEndpoint("one.example.com", extdns.RecordTypeA, "10.0.0.1"))))
+	first := svc.DNSRecordStore.GetByOwnerResourceUID(ResourceKindGateway, "gw-uid-1")
+	require.Len(t, first, 1)
+	firstID := *first[0].Id
+
+	require.NoError(t, svc.CreateOrUpdateDNSRecords(context.Background(),
+		gatewayOwnerBatch(extdns.NewEndpoint("two.example.com", extdns.RecordTypeAAAA, "2001:db8::1"))))
+
+	assert.Nil(t, svc.DNSRecordStore.GetByKey(firstID), "old hostname record should be removed")
+	remain := svc.DNSRecordStore.GetByOwnerResourceUID(ResourceKindGateway, "gw-uid-1")
+	require.Len(t, remain, 1)
+	assert.Equal(t, "two.example.com", *remain[0].Fqdn)
+	assert.Equal(t, extdns.RecordTypeAAAA, *remain[0].RecordType)
+}
+
+func Test_CreateOrUpdateDNSRecords_emptyEndpointsDeletesOwnerRecords(t *testing.T) {
+	svc := newSvc()
+	require.NoError(t, svc.CreateOrUpdateDNSRecords(context.Background(),
+		gatewayOwnerBatch(extdns.NewEndpoint("x.example.com", extdns.RecordTypeA, "10.0.0.1"))))
+	require.Len(t, svc.DNSRecordStore.GetByOwnerResourceUID(ResourceKindGateway, "gw-uid-1"), 1)
+
+	require.NoError(t, svc.CreateOrUpdateDNSRecords(context.Background(), gatewayOwnerBatch()))
+	assert.Empty(t, svc.DNSRecordStore.GetByOwnerResourceUID(ResourceKindGateway, "gw-uid-1"))
 }
 
 func Test_DeleteDNSRecordsByOwner(t *testing.T) {

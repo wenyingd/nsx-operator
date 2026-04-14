@@ -4,10 +4,11 @@
 package gateway
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
-	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,8 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -33,6 +32,8 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	servicecommon "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/dns"
+	extdns "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/endpoint"
+	extdnssrc "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/source"
 )
 
 const (
@@ -75,6 +76,10 @@ type GatewayReconciler struct {
 
 	// listenerSetEnabled is true when the ListenerSet CRD is installed in the cluster.
 	listenerSetEnabled bool
+	// httpRouteEnabled, grpcRouteEnabled, tlsRouteEnabled gate watches and reconcile paths when CRDs exist.
+	httpRouteEnabled bool
+	grpcRouteEnabled bool
+	tlsRouteEnabled  bool
 	// crdReady is true when at least the Gateway CRD is installed in the cluster.
 	// CollectGarbage is a no-op until crdReady becomes true.
 	crdReady bool
@@ -92,7 +97,7 @@ type GatewayReconciler struct {
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	startTime := time.Now()
 	defer func() {
-		log.Info("Finished reconciling Gateway", "Gateway", req.NamespacedName, "duration(ms)", time.Since(startTime).Milliseconds())
+		log.Debug("Finished reconciling Gateway", "Gateway", req.NamespacedName, "duration(ms)", time.Since(startTime).Milliseconds())
 	}()
 
 	log.Debug("Reconcile started", "Gateway", req.NamespacedName)
@@ -131,30 +136,32 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	r.StatusUpdater.IncreaseUpdateTotal()
-	desiredDNSRecords, err := r.buildDNSRecordsForGateway(ctx, gw)
+	desiredBatches, err := r.buildOwnerEndpointsForGateway(ctx, gw)
 	if err != nil {
-		log.Error(err, "Failed to build DNS records for Gateway", "Gateway", req.NamespacedName.String())
+		log.Error(err, "Failed to build DNS endpoints for Gateway", "Gateway", req.NamespacedName.String())
 		return common.ResultRequeueAfter10sec, err
 	}
 	existingOwners := make([]*dns.ResourceRef, 0)
 	var lastErr error
-	for _, rec := range desiredDNSRecords {
-		existingOwners = append(existingOwners, rec.Owner)
-		updateErr := r.Service.CreateOrUpdateDNSRecords(ctx, rec)
+	for _, batch := range desiredBatches {
+		existingOwners = append(existingOwners, batch.Owner)
+		updateErr := r.Service.CreateOrUpdateDNSRecords(ctx, batch)
 		if updateErr != nil {
-			if rec.Owner.Kind == dns.ResourceKindListenerSet {
-				log.Error(updateErr, fmt.Sprintf("Failed to configure DNS records for %s", rec.Owner.Kind), "Gateway", req.NamespacedName.String(), "ListenerSet", rec.Owner.GetNamespace()+"/"+rec.Owner.GetName())
-			} else {
-				log.Error(updateErr, fmt.Sprintf("Failed to configure DNS records for %s", rec.Owner.Kind), "Gateway", req.NamespacedName.String())
+			switch batch.Owner.Kind {
+			case dns.ResourceKindListenerSet, dns.ResourceKindHTTPRoute, dns.ResourceKindGRPCRoute, dns.ResourceKindTLSRoute:
+				log.Error(updateErr, fmt.Sprintf("Failed to configure DNS records for %s", batch.Owner.Kind), "Gateway", req.NamespacedName.String(),
+					batch.Owner.Kind, batch.Owner.GetNamespace()+"/"+batch.Owner.GetName())
+			default:
+				log.Error(updateErr, fmt.Sprintf("Failed to configure DNS records for %s", batch.Owner.Kind), "Gateway", req.NamespacedName.String())
 			}
 			lastErr = updateErr
 		}
 
-		log.Debug("DNS record upsert", "Gateway", req.NamespacedName, "ownerKind", rec.Owner.Kind,
-			"owner", rec.Owner.GetNamespace()+"/"+rec.Owner.GetName(), "err", updateErr, "hostnames", rec.Hostnames)
+		log.Debug("DNS endpoint batch upsert", "Gateway", req.NamespacedName, "ownerKind", batch.Owner.Kind,
+			"owner", batch.Owner.GetNamespace()+"/"+batch.Owner.GetName(), "err", updateErr, "endpoints", len(batch.Endpoints))
 
 		// Update resource conditions.
-		r.updateDNSRecordCondition(ctx, rec.Owner, updateErr)
+		r.updateDNSRecordCondition(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}, batch.Owner, updateErr)
 	}
 
 	// Delete the existing DNS records on the current Gateway but the owner resource does not exist.
@@ -172,7 +179,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	r.StatusUpdater.UpdateSuccess(ctx, gw, nil)
-	log.Info("Reconciling Gateway", "Gateway", req.NamespacedName, "generation", gw.Generation, "dnsRecords", len(desiredDNSRecords))
+	log.Info("Reconciling Gateway", "Gateway", req.NamespacedName, "generation", gw.Generation, "dnsOwnerBatches", len(desiredBatches))
 	return ResultNormal, nil
 }
 
@@ -186,42 +193,6 @@ func (r *GatewayReconciler) deleteAllDNSRecords(ctx context.Context, gw *gateway
 	}
 	r.StatusUpdater.DeleteSuccess(req.NamespacedName, gw)
 	return ResultNormal, nil
-}
-
-// predicateFuncsGateway defines the event filters for Gateway objects.
-// It limits reconciliation to:
-// - Gateways with a managed GatewayClass
-// - Updates where Status.Addresses or Spec.Listeners hostnames change (order-insensitive)
-// - Updates where GatewayClassName changes and either side is managed (enter/leave managed class)
-// - Create/Delete events for managed Gateways only.
-var predicateFuncsGateway = predicate.Funcs{
-	CreateFunc: func(e event.CreateEvent) bool {
-		gw := e.Object.(*gatewayv1.Gateway)
-		return shouldProcessGateway(gw) && hasUsableGatewayIP(gw)
-	},
-	UpdateFunc: func(e event.UpdateEvent) bool {
-		oldObj := e.ObjectOld.(*gatewayv1.Gateway)
-		newObj := e.ObjectNew.(*gatewayv1.Gateway)
-		log.Debug("Receive K8s Gateway update event", "Name", oldObj.Name, "Namespace", oldObj.Namespace)
-		// GatewayClass transition (managed ↔ unmanaged): reconcile to create or delete DNS records.
-		if string(oldObj.Spec.GatewayClassName) != string(newObj.Spec.GatewayClassName) {
-			return shouldProcessGateway(oldObj) || shouldProcessGateway(newObj)
-		}
-		if !shouldProcessGateway(oldObj) && !shouldProcessGateway(newObj) {
-			return false
-		}
-		oldHostnames := collectHostnamesInListeners(oldObj.Spec.Listeners)
-		newHostnames := collectHostnamesInListeners(newObj.Spec.Listeners)
-		if reflect.DeepEqual(oldObj.Status.Addresses, newObj.Status.Addresses) &&
-			sliceEquals(oldHostnames, newHostnames) {
-			return false
-		}
-		return true
-	},
-	DeleteFunc: func(e event.DeleteEvent) bool {
-		gw := e.Object.(*gatewayv1.Gateway)
-		return shouldProcessGateway(gw)
-	},
 }
 
 // buildDNSReadyCondition returns a metav1.Condition for DNSReady from CreateOrUpdateDNSRecords result.
@@ -244,7 +215,7 @@ func buildDNSReadyCondition(err error) metav1.Condition {
 // updateDNSRecordCondition sets the DNSReady condition on the resource that owns the DNS record.
 // If CreateOrUpdateDNSRecords returned an error, status is False and message is the error string;
 // otherwise status is True.
-func (r *GatewayReconciler) updateDNSRecordCondition(ctx context.Context, owner *dns.ResourceRef, err error) {
+func (r *GatewayReconciler) updateDNSRecordCondition(ctx context.Context, gwNN types.NamespacedName, owner *dns.ResourceRef, err error) {
 	cond := buildDNSReadyCondition(err)
 	ownerKey := types.NamespacedName{Namespace: owner.GetNamespace(), Name: owner.GetName()}
 	switch owner.Kind {
@@ -255,6 +226,18 @@ func (r *GatewayReconciler) updateDNSRecordCondition(ctx context.Context, owner 
 	case dns.ResourceKindListenerSet:
 		if uerr := r.updateListenerSetStatusCondition(ctx, ownerKey, cond); uerr != nil {
 			log.Error(uerr, "Failed to update ListenerSet DNSReady condition", "ListenerSet", ownerKey)
+		}
+	case dns.ResourceKindHTTPRoute:
+		if uerr := updateRouteParentDNSCondition(ctx, r, gwNN, ownerKey, cond, getHTTPRouteParentStatus); uerr != nil {
+			log.Error(uerr, "Failed to update HTTPRoute DNSReady condition", "HTTPRoute", ownerKey)
+		}
+	case dns.ResourceKindGRPCRoute:
+		if uerr := updateRouteParentDNSCondition(ctx, r, gwNN, ownerKey, cond, getGRPCRouteParentStatus); uerr != nil {
+			log.Error(uerr, "Failed to update GRPCRoute DNSReady condition", "GRPCRoute", ownerKey)
+		}
+	case dns.ResourceKindTLSRoute:
+		if uerr := updateRouteParentDNSCondition(ctx, r, gwNN, ownerKey, cond, getTLSRouteParentStatus); uerr != nil {
+			log.Error(uerr, "Failed to update TLSRoute DNSReady condition", "TLSRoute", ownerKey)
 		}
 	default:
 		log.Warn("updateDNSRecordCondition: unsupported owner kind, skipping", "kind", owner.Kind, "owner", owner.GetNamespace()+"/"+owner.GetName())
@@ -314,76 +297,157 @@ func getGatewayReference(gw *gatewayv1.Gateway) *dns.ResourceRef {
 	}
 }
 
-func getListenerSetReference(ls gatewayv1.ListenerSet) *dns.ResourceRef {
-	return &dns.ResourceRef{
-		Kind:   dns.ResourceKindListenerSet,
-		Object: ls.GetObjectMeta(),
+func ipsToTargets(ips []net.IP) extdns.Targets {
+	s := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if ip == nil {
+			continue
+		}
+		s = append(s, ip.String())
+	}
+	return extdns.NewTargets(s...)
+}
+
+func dnsResourceLabel(ref *dns.ResourceRef) string {
+	return strings.ToLower(ref.Kind) + "/" + ref.GetNamespace() + "/" + ref.GetName()
+}
+
+func extendEndpointsForHostnames(out *[]*extdns.Endpoint, hostnames []string, targets extdns.Targets, resourceKey string) {
+	ttl := extdns.TTL(0)
+	for _, h := range hostnames {
+		if h == "" {
+			continue
+		}
+		for _, ep := range extdns.EndpointsForHostname(h, targets, ttl, nil, "", resourceKey) {
+			extdns.ApplyExternalDNSSourceLabels(ep, "")
+			*out = append(*out, ep)
+		}
 	}
 }
 
-func (r *GatewayReconciler) buildDNSRecordsForGateway(ctx context.Context, gw *gatewayv1.Gateway) ([]*dns.Record, error) {
+// buildOwnerEndpointsForGateway builds ExternalDNS-style Endpoint batches for routes attached to the Gateway.
+// Gateway and ListenerSet listener hostnames define admission only (CollectAdmissionHostnameFilters +
+// RouteHostnamesMatchingAdmission); DNS names come from route spec/annotations, not from Gateway/ListenerSet
+// hostnames alone. HTTPRoute/GRPCRoute/TLSRoute are included only when extdnssrc HTTP/GRPC/TLS
+// ParentReadyForGateway is true (Accepted=True and Programmed=True for the parent Gateway ref).
+func (r *GatewayReconciler) buildOwnerEndpointsForGateway(ctx context.Context, gw *gatewayv1.Gateway) ([]*dns.OwnerEndpoints, error) {
 	ips := collectIPsFromGateway(gw)
 	if len(ips) == 0 {
 		return nil, nil
 	}
-	var records []*dns.Record
-
-	gwHostnames := collectHostnamesInListeners(gw.Spec.Listeners)
+	targets := ipsToTargets(ips)
 	gwRef := getGatewayReference(gw)
+	gwNN := types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}
 
-	nsCache := make(map[string]common.NameSpaceType)
-
-	getNSType := func(nsName string) (common.NameSpaceType, error) {
-		if t, ok := nsCache[nsName]; ok {
-			return t, nil
-		}
-		t, err := r.getNamespaceType(ctx, nsName)
-		if err == nil {
-			nsCache[nsName] = t
-		}
-		return t, err
+	gwNSType, err := r.getNamespaceType(ctx, gw.Namespace)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(gwHostnames) > 0 {
-		gwNSType, err := getNSType(gw.Namespace)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, &dns.Record{
-			Addresses:       ips,
-			Hostnames:       gwHostnames,
-			AddressProvider: gwRef,
-			Owner:           gwRef,
-			ForSVService:    gwNSType == common.SVServiceNs,
-		})
-	}
+	seenFQDNs := sets.New[string]()
+	var batches []*dns.OwnerEndpoints
 
+	var listenerSets []gatewayv1.ListenerSet
 	if r.listenerSetEnabled {
-		listenerSetList, err := r.listListenerSetsForGateway(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name})
+		var err error
+		listenerSets, err = r.listSortedListenerSetsForGateway(ctx, gwNN)
 		if err != nil {
 			return nil, err
 		}
-		for i := range listenerSetList {
-			ls := listenerSetList[i]
-			hostnames := collectHostnamesFromListenerSet(ls)
-			if len(hostnames) == 0 {
-				continue
-			}
-			lsNSType, err := getNSType(ls.Namespace)
-			if err != nil {
-				return nil, err
-			}
-			records = append(records, &dns.Record{
-				Addresses:       ips,
-				Hostnames:       hostnames,
-				AddressProvider: gwRef,
-				Owner:           getListenerSetReference(ls),
-				ForSVService:    lsNSType == common.SVServiceNs,
-			})
+	}
+	allowed := extdnssrc.CollectAdmissionHostnameFilters(gw, listenerSets)
+
+	// Collect HTTPRoute Endpoints.
+	if r.httpRouteEnabled {
+		if err = collectRouteEndpoints(ctx, r, gwRef, targets, gwNSType, allowed,
+			seenFQDNs, &batches, listHTTPRouteItems, getHTTPRouteInfo, checkHTTPRouteParentReady,
+		); err != nil {
+			return nil, err
 		}
 	}
 
-	return records, nil
+	// Collect GRPCRoute Endpoints.
+	if r.grpcRouteEnabled {
+		if err = collectRouteEndpoints(ctx, r, gwRef, targets, gwNSType, allowed,
+			seenFQDNs, &batches, listGRPCRouteItems, getGRPCRouteInfo, checkGRPCRouteParentReady,
+		); err != nil {
+			return nil, err
+		}
+	}
+
+	// Collect TLSRoute Endpoints.
+	if r.tlsRouteEnabled {
+		if err = collectRouteEndpoints(ctx, r, gwRef, targets, gwNSType, allowed,
+			seenFQDNs, &batches, listTLSRouteItems, getTLSRouteInfo, checkTLSRouteParentReady,
+		); err != nil {
+			return nil, err
+		}
+	}
+
+	return batches, nil
+}
+
+// takeNewHostnames returns hostnames from desired that are not already assigned to another owner
+// for this Gateway (including wildcard overlap per ExternalDNS GwMatchingHost), and registers
+// claimed names in seen.
+func takeNewHostnames(seen sets.Set[string], desired []string) []string {
+	if len(desired) == 0 {
+		return nil
+	}
+	var out []string
+	for _, h := range desired {
+		if h == "" {
+			continue
+		}
+		if hostnameOverlapsSeenFQDNs(seen, h) {
+			continue
+		}
+		seen.Insert(h)
+		out = append(out, h)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// hostnameOverlapsSeenFQDNs reports whether h overlaps any name already claimed for this Gateway,
+// using the same GwMatchingHost semantics as external-dns/source/gateway.go (listener vs route host).
+func hostnameOverlapsSeenFQDNs(seen sets.Set[string], h string) bool {
+	for s := range seen {
+		if _, ok := extdnssrc.GwMatchingHost(s, h); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// appendOwnerEndpointsForRoute applies ExternalDNS-style hostname resolution, takeNewHostnames, and endpoint build
+// for one route (shared by HTTP/GRPC/TLS). Generics do not simplify this in Go: the route types do not share a
+// constraint exposing Spec without a large custom interface; listing/parent-ready checks stay per-type.
+func appendOwnerEndpointsForRoute(seenFQDNs sets.Set[string], batches *[]*dns.OwnerEndpoints, gwRef *dns.ResourceRef,
+	targets extdns.Targets, gwNSType common.NameSpaceType, meta *metav1.ObjectMeta, rawHosts []string,
+	owner *dns.ResourceRef, allowedAdmissionHostnames []string) error {
+	filtered, err := extdnssrc.RouteHostnamesMatchingAdmission(allowedAdmissionHostnames, meta, rawHosts)
+	if err != nil {
+		return err
+	}
+	routeHostnames := takeNewHostnames(seenFQDNs, filtered)
+	if len(routeHostnames) == 0 {
+		return nil
+	}
+	var eps []*extdns.Endpoint
+	extendEndpointsForHostnames(&eps, routeHostnames, targets, dnsResourceLabel(owner))
+	if len(eps) == 0 {
+		return nil
+	}
+	*batches = append(*batches, &dns.OwnerEndpoints{
+		AddressProvider: gwRef,
+		Owner:           owner,
+		ForSVService:    gwNSType == common.SVServiceNs,
+		Endpoints:       eps,
+	})
+	return nil
 }
 
 func (r *GatewayReconciler) getNamespaceType(ctx context.Context, namespace string) (common.NameSpaceType, error) {
@@ -396,7 +460,7 @@ func (r *GatewayReconciler) getNamespaceType(ctx context.Context, namespace stri
 	return common.GetNamespaceType(obj, nil), nil
 }
 
-func (r *GatewayReconciler) listListenerSetsForGateway(
+func (r *GatewayReconciler) listSortedListenerSetsForGateway(
 	ctx context.Context,
 	gwNamespacedName types.NamespacedName,
 ) ([]gatewayv1.ListenerSet, error) {
@@ -408,7 +472,14 @@ func (r *GatewayReconciler) listListenerSetsForGateway(
 	); err != nil {
 		return nil, err
 	}
-	return lsList.Items, nil
+	listenerSets := lsList.Items
+	slices.SortFunc(listenerSets, func(a, b gatewayv1.ListenerSet) int {
+		if c := cmp.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Name, b.Name)
+	})
+	return listenerSets, nil
 }
 
 func collectIPsFromGateway(gw *gatewayv1.Gateway) []net.IP {
@@ -429,19 +500,6 @@ func collectIPsFromGateway(gw *gatewayv1.Gateway) []net.IP {
 	return ips
 }
 
-func collectHostnamesInListeners(gwListeners []gatewayv1.Listener) []string {
-	var hostnames []string
-	for _, l := range gwListeners {
-		if l.Hostname != nil {
-			h := strings.TrimSpace(string(*l.Hostname))
-			if h != "" {
-				hostnames = append(hostnames, h)
-			}
-		}
-	}
-	return hostnames
-}
-
 // hasUsableGatewayIP returns true if the Gateway has at least one parseable IP address (IPAddressType).
 // Used to decide whether we can create DNS records (need IP) or should delete existing ones.
 func hasUsableGatewayIP(gw *gatewayv1.Gateway) bool {
@@ -451,13 +509,7 @@ func hasUsableGatewayIP(gw *gatewayv1.Gateway) bool {
 func (r *GatewayReconciler) setupWithManager(mgr ctrl.Manager) error {
 	if r.listenerSetEnabled {
 		// Register the ListenerSet→Gateway field index only when the CRD is present;
-		// the index is required by listListenerSetsForGateway at reconcile time.
-		if err := mgr.GetFieldIndexer().IndexField(
-			context.TODO(),
-			&gatewayv1.ListenerSet{},
-			listenerSetParentGatewayIndex,
-			listenerSetParentGatewayIndexFunc,
-		); err != nil {
+		if err := mgr.GetFieldIndexer().IndexField(context.TODO(), &gatewayv1.ListenerSet{}, listenerSetParentGatewayIndex, listenerSetParentGatewayIndexFunc); err != nil {
 			log.Error(err, "Failed to register ListenerSet cache indexer", "controller", "Gateway")
 			return err
 		}
@@ -465,10 +517,37 @@ func (r *GatewayReconciler) setupWithManager(mgr ctrl.Manager) error {
 		log.Info("ListenerSet CRD is not installed, Gateway controller will not process ListenerSet resources")
 	}
 
+	if r.httpRouteEnabled {
+		if err := mgr.GetFieldIndexer().IndexField(context.TODO(), &gatewayv1.HTTPRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc); err != nil {
+			log.Error(err, "Failed to register HTTPRoute cache indexer", "controller", "Gateway")
+			return err
+		}
+	}
+	if r.grpcRouteEnabled {
+		if err := mgr.GetFieldIndexer().IndexField(context.TODO(), &gatewayv1.GRPCRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc); err != nil {
+			log.Error(err, "Failed to register GRPCRoute cache indexer", "controller", "Gateway")
+			return err
+		}
+	}
+	if r.tlsRouteEnabled {
+		if err := mgr.GetFieldIndexer().IndexField(context.TODO(), &gatewayv1.TLSRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc); err != nil {
+			log.Error(err, "Failed to register TLSRoute cache indexer", "controller", "Gateway")
+			return err
+		}
+	}
+
 	b := ctrl.NewControllerManagedBy(mgr).For(&gatewayv1.Gateway{}, builder.WithPredicates(predicateFuncsGateway))
 	if r.listenerSetEnabled {
-		b = b.Watches(&gatewayv1.ListenerSet{}, r.listenerSetEnqueueHandler(),
-			builder.WithPredicates(predicateFuncsListenerSet))
+		b = b.Watches(&gatewayv1.ListenerSet{}, r.listenerSetEnqueueHandler(), builder.WithPredicates(r.predicateFuncsListenerSet()))
+	}
+	if r.httpRouteEnabled {
+		b = b.Watches(&gatewayv1.HTTPRoute{}, r.routeEnqueueHandler(), builder.WithPredicates(r.predicateFuncsHTTPRoute()))
+	}
+	if r.grpcRouteEnabled {
+		b = b.Watches(&gatewayv1.GRPCRoute{}, r.routeEnqueueHandler(), builder.WithPredicates(r.predicateFuncsGRPCRoute()))
+	}
+	if r.tlsRouteEnabled {
+		b = b.Watches(&gatewayv1.TLSRoute{}, r.routeEnqueueHandler(), builder.WithPredicates(r.predicateFuncsTLSRoute()))
 	}
 
 	return b.WithOptions(controller.Options{MaxConcurrentReconciles: common.NumReconcile()}).
@@ -512,24 +591,15 @@ func (r *GatewayReconciler) CollectGarbage(ctx context.Context) error {
 				errList = append(errList, err)
 			}
 		} else {
-			existingOwners := make([]*dns.ResourceRef, 0)
-			if len(collectHostnamesInListeners(gwCR.Spec.Listeners)) > 0 {
-				existingOwners = append(existingOwners, getGatewayReference(&gwCR))
+			desiredBatches, err := r.buildOwnerEndpointsForGateway(ctx, &gwCR)
+			if err != nil {
+				log.Error(err, "Failed to build desired DNS endpoints for GC", "Gateway", elem.String())
+				errList = append(errList, err)
+				continue
 			}
-
-			if r.listenerSetEnabled {
-				listenerSetList, err := r.listListenerSetsForGateway(ctx, types.NamespacedName{Namespace: gwCR.Namespace, Name: gwCR.Name})
-				if err != nil {
-					log.Error(err, "Failed to list K8s ListenerSet referred to the existing Gateway", "Gateway", elem.String())
-					errList = append(errList, err)
-					continue
-				}
-				for i := range listenerSetList {
-					ls := listenerSetList[i]
-					if len(collectHostnamesFromListenerSet(ls)) > 0 {
-						existingOwners = append(existingOwners, getListenerSetReference(ls))
-					}
-				}
+			existingOwners := make([]*dns.ResourceRef, 0, len(desiredBatches))
+			for i := range desiredBatches {
+				existingOwners = append(existingOwners, desiredBatches[i].Owner)
 			}
 
 			// Delete the DNS records configured on the given Gateway but owner does not exist.
@@ -547,52 +617,73 @@ func (r *GatewayReconciler) CollectGarbage(ctx context.Context) error {
 	return nil
 }
 
-// checkGatewayCRDs uses the discovery API to determine whether the Gateway and
-// ListenerSet CRDs are installed under gateway.k8s.io/v1.
-func (r *GatewayReconciler) checkGatewayCRDs(mgr ctrl.Manager) (gatewayExists, listenerSetExists bool, err error) {
+// gatewayAPIResources reports which gateway.networking.k8s.io/v1 resources exist in the cluster.
+type gatewayAPIResources struct {
+	Gateway     bool
+	ListenerSet bool
+	HTTPRoute   bool
+	GRPCRoute   bool
+	TLSRoute    bool
+}
+
+// checkGatewayCRDs uses the discovery API to determine whether Gateway API CRDs are installed under gateway.networking.k8s.io/v1.
+func (r *GatewayReconciler) checkGatewayCRDs(mgr ctrl.Manager) (gatewayAPIResources, error) {
+	var out gatewayAPIResources
 	if r.discoveryClient == nil {
+		var err error
 		r.discoveryClient, err = discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 		if err != nil {
 			log.Error(err, "Failed to create discovery client", "controller", "Gateway")
-			return false, false, err
+			return out, err
 		}
 	}
 	resourceList, err := r.discoveryClient.ServerResourcesForGroupVersion(gatewayAPIGroupVersion)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, false, nil
+			return out, nil
 		}
-		return false, false, err
+		return out, err
 	}
 	if resourceList == nil {
-		return false, false, nil
+		return out, nil
 	}
-	for _, r := range resourceList.APIResources {
-		switch r.Name {
+	for _, res := range resourceList.APIResources {
+		switch res.Name {
 		case "gateways":
-			gatewayExists = true
+			out.Gateway = true
 		case "listenersets":
-			listenerSetExists = true
+			out.ListenerSet = true
+		case "httproutes":
+			out.HTTPRoute = true
+		case "grpcroutes":
+			out.GRPCRoute = true
+		case "tlsroutes":
+			out.TLSRoute = true
 		}
 	}
-	return gatewayExists, listenerSetExists, nil
+	return out, nil
 }
 
 func (r *GatewayReconciler) StartController(mgr ctrl.Manager, _ webhook.Server) error {
-	gatewayExists, listenerSetExists, err := r.checkGatewayCRDs(mgr)
+	feat, err := r.checkGatewayCRDs(mgr)
 	if err != nil {
 		log.Error(err, "Failed to check Gateway API CRDs", "controller", "Gateway")
 		return err
 	}
 
-	if !gatewayExists {
+	if !feat.Gateway {
 		log.Info("Gateway API CRDs are not installed in the cluster, skipping Gateway controller start")
 		return nil
 	}
 
-	r.listenerSetEnabled = listenerSetExists
+	r.listenerSetEnabled = feat.ListenerSet
+	r.httpRouteEnabled = feat.HTTPRoute
+	r.grpcRouteEnabled = feat.GRPCRoute
+	r.tlsRouteEnabled = feat.TLSRoute
+
 	r.crdReady = true
-	log.Debug("Gateway StartController: Gateway API present", "listenerSetEnabled", listenerSetExists)
+	log.Debug("Gateway StartController: Gateway API present", "listenerSetEnabled", feat.ListenerSet,
+		"httpRouteEnabled", feat.HTTPRoute, "grpcRouteEnabled", feat.GRPCRoute, "tlsRouteEnabled", feat.TLSRoute)
 	if err = r.setupWithManager(mgr); err != nil {
 		log.Error(err, "Failed to create controller", "controller", "Gateway")
 		return err

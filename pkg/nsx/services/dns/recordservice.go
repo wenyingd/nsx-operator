@@ -20,9 +20,12 @@ type DNSRecordService struct {
 	DNSRecordStore *DNSRecordStore
 }
 
-func (s *DNSRecordService) CreateOrUpdateDNSRecords(ctx context.Context, dnsRecord *Record) error {
-	// TODO: validate FQDNs against permitted DNS zones and create/update DNS records in NSX.
-	updatedRecords, err := s.createOrUpdateDNSRecordsInNSX(ctx, nil)
+func (s *DNSRecordService) CreateOrUpdateDNSRecords(ctx context.Context, batch *OwnerEndpoints) error {
+	if batch == nil {
+		return nil
+	}
+	// TODO: validate FQDNs against permitted DNS zones.
+	updatedRecords, err := s.createOrUpdateDNSRecordsInNSX(ctx, batch)
 	if err != nil {
 		return err
 	}
@@ -102,9 +105,48 @@ func (s *DNSRecordService) deleteDNSRecords(ctx context.Context, records []*DNSR
 	return nil
 }
 
-// TODO: Implement this function to create or update DNS record in NSX using HAPI
-func (s *DNSRecordService) createOrUpdateDNSRecordsInNSX(ctx context.Context, records []*DNSRecord) ([]*DNSRecord, error) {
-	return nil, nil
+// createOrUpdateDNSRecordsInNSX maps OwnerEndpoints (ExternalDNS-style) into store DNSRecords.
+// NSX API calls remain in deleteDNSRecordsInNSX / future HAPI; this layer owns store reconciliation per owner.
+func (s *DNSRecordService) createOrUpdateDNSRecordsInNSX(_ context.Context, batch *OwnerEndpoints) ([]*DNSRecord, error) {
+	if batch == nil || batch.Owner == nil || batch.AddressProvider == nil || s.DNSRecordStore == nil {
+		return nil, nil
+	}
+	createdFor := resourceKindToCreatedFor(batch.Owner.Kind)
+	if createdFor == "" {
+		return nil, nil
+	}
+
+	existing := s.DNSRecordStore.GetByOwnerResourceUID(batch.Owner.Kind, string(batch.Owner.GetUID()))
+	desiredIDs := sets.New[string]()
+	var out []*DNSRecord
+	seen := sets.New[string]()
+
+	for _, ep := range batch.Endpoints {
+		if ep == nil {
+			continue
+		}
+		id := stableDNSRecordID(batch.Owner, ep)
+		if seen.Has(id) {
+			continue
+		}
+		seen.Insert(id)
+		desiredIDs.Insert(id)
+		out = append(out, dnsRecordFromEndpoint(id, batch, ep))
+	}
+
+	for _, old := range existing {
+		if old.Id == nil {
+			continue
+		}
+		if desiredIDs.Has(*old.Id) {
+			continue
+		}
+		cp := *old
+		cp.MarkedForDelete = common.Bool(true)
+		out = append(out, &cp)
+	}
+
+	return out, nil
 }
 
 // TODO: Implement this function to delete DNS record in NSX using HAPI

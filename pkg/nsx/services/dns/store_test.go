@@ -145,6 +145,9 @@ func Test_resourceKindToCreatedFor(t *testing.T) {
 	}{
 		{ResourceKindGateway, common.TagValueDNSRecordForGateway},
 		{ResourceKindListenerSet, common.TagValueDNSRecordForListenerSet},
+		{ResourceKindHTTPRoute, common.TagValueDNSRecordForHTTPRoute},
+		{ResourceKindGRPCRoute, common.TagValueDNSRecordForGRPCRoute},
+		{ResourceKindTLSRoute, common.TagValueDNSRecordForTLSRoute},
 		{ResourceKindService, common.TagValueDNSRecordForService},
 		{"Unknown", ""},
 		{"", ""},

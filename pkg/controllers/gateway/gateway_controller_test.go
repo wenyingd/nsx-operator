@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -35,6 +36,7 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/controllers/common"
 	servicecommon "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/dns"
+	extdns "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/endpoint"
 )
 
 func init() {
@@ -85,8 +87,11 @@ func (f *fakeDiscoveryClient) ServerResourcesForGroupVersion(_ string) (*metav1.
 func createFakeManagerAndClient(objs ...client.Object) (ctrl.Manager, client.Client) {
 	b := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&gatewayv1.Gateway{}, &gatewayv1.ListenerSet{}).
-		WithIndex(&gatewayv1.ListenerSet{}, listenerSetParentGatewayIndex, listenerSetParentGatewayIndexFunc)
+		WithStatusSubresource(&gatewayv1.Gateway{}, &gatewayv1.ListenerSet{}, &gatewayv1.HTTPRoute{}, &gatewayv1.GRPCRoute{}, &gatewayv1.TLSRoute{}).
+		WithIndex(&gatewayv1.ListenerSet{}, listenerSetParentGatewayIndex, listenerSetParentGatewayIndexFunc).
+		WithIndex(&gatewayv1.HTTPRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc).
+		WithIndex(&gatewayv1.GRPCRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc).
+		WithIndex(&gatewayv1.TLSRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc)
 	if len(objs) > 0 {
 		b.WithObjects(objs...)
 	}
@@ -111,8 +116,11 @@ func fakeClientForGatewayTests(objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objs...).
-		WithStatusSubresource(&gatewayv1.Gateway{}, &gatewayv1.ListenerSet{}).
+		WithStatusSubresource(&gatewayv1.Gateway{}, &gatewayv1.ListenerSet{}, &gatewayv1.HTTPRoute{}, &gatewayv1.GRPCRoute{}, &gatewayv1.TLSRoute{}).
 		WithIndex(&gatewayv1.ListenerSet{}, listenerSetParentGatewayIndex, listenerSetParentGatewayIndexFunc).
+		WithIndex(&gatewayv1.HTTPRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc).
+		WithIndex(&gatewayv1.GRPCRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc).
+		WithIndex(&gatewayv1.TLSRoute{}, routeParentGatewayIndex, routeParentGatewayIndexFunc).
 		Build()
 }
 
@@ -218,6 +226,40 @@ func newTestListenerSet(name, ns, gwName, hostname string) *gatewayv1.ListenerSe
 }
 
 // newTestListenerSetMulti builds a ListenerSet with multiple listener hostnames (names l1, l2, …).
+// newTestHTTPRouteReady returns an HTTPRoute attached to a Gateway with Accepted+Programmed parent status.
+func newTestHTTPRouteReady(name, ns, gwName string, hostnames ...gatewayv1.Hostname) *gatewayv1.HTTPRoute {
+	gwGroup := gatewayv1.Group(gatewayv1.GroupName)
+	gwKind := gatewayv1.Kind("Gateway")
+	parent := gatewayv1.ParentReference{
+		Group: &gwGroup,
+		Kind:  &gwKind,
+		Name:  gatewayv1.ObjectName(gwName),
+	}
+	return &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID("uid-" + name)},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{parent},
+			},
+			Hostnames: hostnames,
+			Rules:     []gatewayv1.HTTPRouteRule{{}},
+		},
+		Status: gatewayv1.HTTPRouteStatus{
+			RouteStatus: gatewayv1.RouteStatus{
+				Parents: []gatewayv1.RouteParentStatus{
+					{
+						ParentRef: parent,
+						Conditions: []metav1.Condition{
+							{Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue},
+							{Type: "Programmed", Status: metav1.ConditionTrue},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func newTestListenerSetMulti(name, ns, gwName string, hostnames ...string) *gatewayv1.ListenerSet {
 	gwKind := gatewayv1.Kind("Gateway")
 	gwGroup := gatewayv1.Group(gatewayv1.GroupName)
@@ -243,7 +285,7 @@ func ptr[T any](v T) *T { return &v }
 func patchCreateOrUpdateDNSRecordsNoOp(t *testing.T, svc *dns.DNSRecordService) {
 	t.Helper()
 	p := gomonkey.ApplyMethod(reflect.TypeOf(svc), "CreateOrUpdateDNSRecords",
-		func(_ *dns.DNSRecordService, _ context.Context, _ *dns.Record) error { return nil })
+		func(_ *dns.DNSRecordService, _ context.Context, _ *dns.OwnerEndpoints) error { return nil })
 	t.Cleanup(p.Reset)
 }
 
@@ -362,18 +404,43 @@ func Test_RestoreReconcile(t *testing.T) {
 	assert.NoError(t, r.RestoreReconcile())
 }
 
-func Test_buildDNSRecordsForGateway_listenerSetOwner(t *testing.T) {
+func Test_takeNewHostnames_wildcardOverlap(t *testing.T) {
+	seen := sets.New[string]()
+	out1 := takeNewHostnames(seen, []string{"*.example.com"})
+	assert.Equal(t, []string{"*.example.com"}, out1)
+	out2 := takeNewHostnames(seen, []string{"app.example.com"})
+	assert.Empty(t, out2, "concrete host overlapping existing wildcard should not be claimed again")
+
+	seen2 := sets.New[string]()
+	out3 := takeNewHostnames(seen2, []string{"app.example.com"})
+	assert.Equal(t, []string{"app.example.com"}, out3)
+	out4 := takeNewHostnames(seen2, []string{"*.example.com"})
+	assert.Empty(t, out4, "wildcard overlapping existing concrete host should not be claimed again")
+}
+
+func Test_takeNewHostnames_orderStableExactMatch(t *testing.T) {
+	seen := sets.New[string]()
+	assert.Equal(t, []string{"a.example.com"}, takeNewHostnames(seen, []string{"a.example.com"}))
+	assert.Empty(t, takeNewHostnames(seen, []string{"a.example.com"}))
+}
+
+func Test_buildOwnerEndpointsForGateway_listenerSetOwner(t *testing.T) {
 	ctx := context.Background()
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}}
 	gw := newTestGateway("gw1", "ns1", "10.0.0.1", false, nil)
 	ls := newTestListenerSet("ls1", "ns1", "gw1", "app.example.com")
-	fc := fakeClientForGatewayTests(ns, gw, ls)
-	r := &GatewayReconciler{Client: fc, listenerSetEnabled: true}
-	recs, err := r.buildDNSRecordsForGateway(ctx, gw)
+	hr := newTestHTTPRouteReady("hr1", "ns1", "gw1", gatewayv1.Hostname("app.example.com"))
+	fc := fakeClientForGatewayTests(ns, gw, ls, hr)
+	r := &GatewayReconciler{Client: fc, listenerSetEnabled: true, httpRouteEnabled: true}
+	batches, err := r.buildOwnerEndpointsForGateway(ctx, gw)
 	require.NoError(t, err)
-	require.Len(t, recs, 1)
-	assert.Equal(t, dns.ResourceKindListenerSet, recs[0].Owner.Kind)
-	assert.Equal(t, []string{"app.example.com"}, recs[0].Hostnames)
+	require.Len(t, batches, 1)
+	assert.Equal(t, dns.ResourceKindHTTPRoute, batches[0].Owner.Kind)
+	var names []string
+	for _, ep := range batches[0].Endpoints {
+		names = append(names, ep.DNSName)
+	}
+	assert.Contains(t, names, "app.example.com")
 }
 
 func Test_Reconcile_gatewayClassTransitions(t *testing.T) {
@@ -424,15 +491,16 @@ func Test_Reconcile_DNS_recordsTrackAddressAndHostnames(t *testing.T) {
 	gw := newTestGateway("gw1", "ns1", "10.0.0.1", false, func(g *gatewayv1.Gateway) {
 		g.Spec.Listeners = []gatewayv1.Listener{{Name: "l1", Hostname: ptr(gatewayv1.Hostname("a.example.com")), Port: 80, Protocol: gatewayv1.HTTPProtocolType}}
 	})
-	fc := fakeClientForGatewayTests(ns, gw)
+	hr := newTestHTTPRouteReady("hr1", "ns1", "gw1", gatewayv1.Hostname("a.example.com"))
+	fc := fakeClientForGatewayTests(ns, gw, hr)
 	r := &GatewayReconciler{
 		Client: fc, Scheme: scheme, Service: &dns.DNSRecordService{DNSRecordStore: dns.BuildDNSRecordStore()},
-		StatusUpdater: newMockStatusUpdater(), Recorder: record.NewFakeRecorder(10),
+		StatusUpdater: newMockStatusUpdater(), Recorder: record.NewFakeRecorder(10), httpRouteEnabled: true,
 	}
-	var seen []*dns.Record
+	var seen []*dns.OwnerEndpoints
 	p := gomonkey.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateDNSRecords",
-		func(_ *dns.DNSRecordService, _ context.Context, rec *dns.Record) error {
-			seen = append(seen, rec)
+		func(_ *dns.DNSRecordService, _ context.Context, batch *dns.OwnerEndpoints) error {
+			seen = append(seen, batch)
 			return nil
 		})
 	t.Cleanup(p.Reset)
@@ -441,8 +509,11 @@ func Test_Reconcile_DNS_recordsTrackAddressAndHostnames(t *testing.T) {
 	_, err := r.Reconcile(ctx, req)
 	require.NoError(t, err)
 	require.Len(t, seen, 1)
-	assert.True(t, seen[0].Addresses[0].Equal(net.ParseIP("10.0.0.1")))
-	assert.Equal(t, []string{"a.example.com"}, seen[0].Hostnames)
+	require.NotEmpty(t, seen[0].Endpoints)
+	assert.Equal(t, "a.example.com", seen[0].Endpoints[0].DNSName)
+	assert.Contains(t, []string(seen[0].Endpoints[0].Targets), "10.0.0.1")
+	assert.Equal(t, "external-dns", seen[0].Endpoints[0].Labels[extdns.HeritageLabelKey])
+	assert.Equal(t, extdns.DefaultSourceOwnerID, seen[0].Endpoints[0].Labels[extdns.OwnerLabelKey])
 
 	latest := &gatewayv1.Gateway{}
 	require.NoError(t, fc.Get(ctx, req.NamespacedName, latest))
@@ -451,16 +522,20 @@ func Test_Reconcile_DNS_recordsTrackAddressAndHostnames(t *testing.T) {
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
 	require.Len(t, seen, 2)
-	assert.True(t, seen[1].Addresses[0].Equal(net.ParseIP("10.0.0.2")))
+	assert.Contains(t, []string(seen[1].Endpoints[0].Targets), "10.0.0.2")
 
 	require.NoError(t, fc.Get(ctx, req.NamespacedName, latest))
 	h := gatewayv1.Hostname("b.example.com")
 	latest.Spec.Listeners = []gatewayv1.Listener{{Name: "l1", Hostname: &h, Port: 80, Protocol: gatewayv1.HTTPProtocolType}}
 	require.NoError(t, fc.Update(ctx, latest))
+	latestHR := &gatewayv1.HTTPRoute{}
+	require.NoError(t, fc.Get(ctx, types.NamespacedName{Namespace: "ns1", Name: "hr1"}, latestHR))
+	latestHR.Spec.Hostnames = []gatewayv1.Hostname{"b.example.com"}
+	require.NoError(t, fc.Update(ctx, latestHR))
 	_, err = r.Reconcile(ctx, req)
 	require.NoError(t, err)
 	require.Len(t, seen, 3)
-	assert.Equal(t, []string{"b.example.com"}, seen[2].Hostnames)
+	assert.Equal(t, "b.example.com", seen[2].Endpoints[0].DNSName)
 }
 
 func Test_Reconcile_listenerSetParentRefChanges(t *testing.T) {
@@ -517,12 +592,14 @@ func Test_Reconcile_listenerSetHostnameChange(t *testing.T) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}}
 	gw := newTestGateway("gw1", "ns1", "10.0.0.1", false, nil)
 	ls := newTestListenerSet("ls1", "ns1", "gw1", "old.example.com")
-	r, fc, _ := reconcilerForFakeClient(t, true, ns, gw, ls)
+	hr := newTestHTTPRouteReady("hr1", "ns1", "gw1", gatewayv1.Hostname("old.example.com"))
+	r, fc, _ := reconcilerForFakeClient(t, true, ns, gw, ls, hr)
+	r.httpRouteEnabled = true
 	var seen []string
 	p := gomonkey.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateDNSRecords",
-		func(_ *dns.DNSRecordService, _ context.Context, rec *dns.Record) error {
-			if rec.Owner.Kind == dns.ResourceKindListenerSet {
-				seen = append(seen, rec.Hostnames[0])
+		func(_ *dns.DNSRecordService, _ context.Context, batch *dns.OwnerEndpoints) error {
+			if batch.Owner.Kind == dns.ResourceKindHTTPRoute && len(batch.Endpoints) > 0 {
+				seen = append(seen, batch.Endpoints[0].DNSName)
 			}
 			return nil
 		})
@@ -536,6 +613,10 @@ func Test_Reconcile_listenerSetHostnameChange(t *testing.T) {
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Namespace: "ns1", Name: "ls1"}, latestLS))
 	latestLS.Spec.Listeners[0].Hostname = ptr(gatewayv1.Hostname("new.example.com"))
 	require.NoError(t, fc.Update(ctx, latestLS))
+	latestHR := &gatewayv1.HTTPRoute{}
+	require.NoError(t, fc.Get(ctx, types.NamespacedName{Namespace: "ns1", Name: "hr1"}, latestHR))
+	latestHR.Spec.Hostnames = []gatewayv1.Hostname{"new.example.com"}
+	require.NoError(t, fc.Update(ctx, latestHR))
 	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "gw1"}})
 	require.NoError(t, err)
 	require.Equal(t, []string{"old.example.com", "new.example.com"}, seen)
@@ -560,6 +641,7 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 					g.Spec.Listeners = []gatewayv1.Listener{{Name: "dns-l1", Hostname: ptr(gatewayv1.Hostname("svc.example.com"))}}
 				}),
 				newTestListenerSet("ls1", "ns1", "gw1", "app.example.com"),
+				newTestHTTPRouteReady("hr1", "ns1", "gw1", gatewayv1.Hostname("svc.example.com"), gatewayv1.Hostname("app.example.com")),
 			},
 			reqName: "gw1", listenerSetEnabled: true,
 			expectStatus: []string{callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateSuccess},
@@ -579,6 +661,7 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 				newTestGateway("gw1", "ns1", "10.10.1.1", false, func(g *gatewayv1.Gateway) {
 					g.Spec.Listeners = []gatewayv1.Listener{{Name: "dns-l1", Hostname: ptr(gatewayv1.Hostname("svc.example.com"))}}
 				}),
+				newTestHTTPRouteReady("hr1", "ns1", "gw1", gatewayv1.Hostname("svc.example.com")),
 			},
 			reqName: "gw1", mockDNSFail: true,
 			expectStatus: []string{callIncreaseSyncTotal, callIncreaseUpdateTotal, callUpdateFail},
@@ -590,6 +673,7 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 				newTestGateway("gw1", "ns1", "10.10.1.1", false, func(g *gatewayv1.Gateway) {
 					g.Spec.Listeners = []gatewayv1.Listener{{Name: "dns-l1", Hostname: ptr(gatewayv1.Hostname("svc.example.com"))}}
 				}),
+				newTestHTTPRouteReady("hr1", "ns1", "gw1", gatewayv1.Hostname("svc.example.com")),
 			},
 			reqName:      "gw1",
 			expectStatus: []string{callIncreaseSyncTotal, callIncreaseUpdateTotal},
@@ -619,9 +703,10 @@ func TestGatewayReconciler_Reconcile(t *testing.T) {
 			r := &GatewayReconciler{
 				Client: fc, Scheme: scheme, Service: dnsSvc, StatusUpdater: updater,
 				Recorder: record.NewFakeRecorder(10), listenerSetEnabled: tt.listenerSetEnabled,
+				httpRouteEnabled: true,
 			}
 			p := gomonkey.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateDNSRecords",
-				func(_ *dns.DNSRecordService, _ context.Context, _ *dns.Record) error {
+				func(_ *dns.DNSRecordService, _ context.Context, _ *dns.OwnerEndpoints) error {
 					if tt.mockDNSFail {
 						return fmt.Errorf("dns provider unreachable")
 					}
@@ -716,7 +801,7 @@ func Test_updateDNSRecordCondition(t *testing.T) {
 			types.NamespacedName{Namespace: "ns1", Name: "ls1"}, &gatewayv1.ListenerSet{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			r.updateDNSRecordCondition(ctx, tt.owner, nil)
+			r.updateDNSRecordCondition(ctx, types.NamespacedName{Namespace: "ns1", Name: "gw1"}, tt.owner, nil)
 			require.NoError(t, r.Client.Get(ctx, tt.getKey, tt.obj))
 			var conds []metav1.Condition
 			switch o := tt.obj.(type) {
@@ -736,7 +821,7 @@ func Test_updateDNSRecordCondition(t *testing.T) {
 		})
 	}
 	t.Run("unknown kind skipped", func(t *testing.T) {
-		r.updateDNSRecordCondition(ctx, &dns.ResourceRef{Kind: "Unknown", Object: &metav1.ObjectMeta{Namespace: "ns1", Name: "gw1"}}, nil)
+		r.updateDNSRecordCondition(ctx, types.NamespacedName{Namespace: "ns1", Name: "gw1"}, &dns.ResourceRef{Kind: "Unknown", Object: &metav1.ObjectMeta{Namespace: "ns1", Name: "gw1"}}, nil)
 	})
 }
 
@@ -769,14 +854,17 @@ func Test_CollectGarbage(t *testing.T) {
 		{
 			name:        "gateway still exists",
 			seedRecords: []*dns.DNSRecord{dnsRecordOwnedByGateway("rec-gc-3", "uid-gw1", "ns1", "gw1")},
-			k8sObjects: []client.Object{&gatewayv1.Gateway{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "gw1"},
-				Spec: gatewayv1.GatewaySpec{
-					GatewayClassName: gatewayv1.ObjectName(common.ManagedK8sGatewayClassIstio),
-					Listeners:        []gatewayv1.Listener{{Name: "l1", Hostname: &h, Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+			k8sObjects: []client.Object{
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}},
+				&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "gw1"},
+					Spec: gatewayv1.GatewaySpec{
+						GatewayClassName: gatewayv1.ObjectName(common.ManagedK8sGatewayClassIstio),
+						Listeners:        []gatewayv1.Listener{{Name: "l1", Hostname: &h, Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+					},
+					Status: gatewayv1.GatewayStatus{Addresses: []gatewayv1.GatewayStatusAddress{{Type: &ipType, Value: "10.0.0.1"}}},
 				},
-				Status: gatewayv1.GatewayStatus{Addresses: []gatewayv1.GatewayStatusAddress{{Type: &ipType, Value: "10.0.0.1"}}},
-			}},
+			},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -875,40 +963,45 @@ func Test_checkGatewayCRDs(t *testing.T) {
 		discoveryErr error
 		wantGW       bool
 		wantLS       bool
+		wantHTTP     bool
+		wantGRPC     bool
+		wantTLS      bool
 		wantErr      bool
 	}{
-		{"both CRDs", &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: "gateways"}, {Name: "listenersets"}}}, nil, true, true, false},
-		{"gateway only", &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: "gateways"}}}, nil, true, false, false},
-		{"empty list", &metav1.APIResourceList{}, nil, false, false, false},
-		{"nil list", nil, nil, false, false, false},
-		{"404", nil, apierrors.NewNotFound(schema.GroupResource{Group: "gateway.k8s.io", Resource: "v1"}, ""), false, false, false},
-		{"other error", nil, fmt.Errorf("refused"), false, false, true},
-		{"extra resources", &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: "gateways"}, {Name: "httproutes"}}}, nil, true, false, false},
+		{"both CRDs", &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: "gateways"}, {Name: "listenersets"}}}, nil, true, true, false, false, false, false},
+		{"gateway only", &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: "gateways"}}}, nil, true, false, false, false, false, false},
+		{"empty list", &metav1.APIResourceList{}, nil, false, false, false, false, false, false},
+		{"nil list", nil, nil, false, false, false, false, false, false},
+		{"404", nil, apierrors.NewNotFound(schema.GroupResource{Group: "gateway.k8s.io", Resource: "v1"}, ""), false, false, false, false, false, false},
+		{"other error", nil, fmt.Errorf("refused"), false, false, false, false, false, true},
+		{"extra resources", &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: "gateways"}, {Name: "httproutes"}, {Name: "grpcroutes"}, {Name: "tlsroutes"}}}, nil, true, false, true, true, true, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &GatewayReconciler{discoveryClient: &fakeDiscoveryClient{resources: tt.resources, err: tt.discoveryErr}}
-			gotGW, gotLS, err := r.checkGatewayCRDs(nil)
+			got, err := r.checkGatewayCRDs(nil)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
 				require.NoError(t, err)
 			}
-			assert.Equal(t, tt.wantGW, gotGW)
-			assert.Equal(t, tt.wantLS, gotLS)
+			assert.Equal(t, tt.wantGW, got.Gateway)
+			assert.Equal(t, tt.wantLS, got.ListenerSet)
+			assert.Equal(t, tt.wantHTTP, got.HTTPRoute)
+			assert.Equal(t, tt.wantGRPC, got.GRPCRoute)
+			assert.Equal(t, tt.wantTLS, got.TLSRoute)
 		})
 	}
 }
 
 func Test_StartController(t *testing.T) {
 	for _, tt := range []struct {
-		name                    string
-		resources               *metav1.APIResourceList
-		discoveryErr            error
-		indexFieldErr           error
+		name                     string
+		resources                *metav1.APIResourceList
+		discoveryErr             error
 		stubSetupWithManagerNil bool
-		wantErr                 bool
-		wantCrdReady            bool
-		wantLSEnabled           bool
+		wantErr                  bool
+		wantCrdReady             bool
+		wantLSEnabled            bool
 	}{
 		{name: "no gateway CRD", resources: &metav1.APIResourceList{}},
 		{name: "discovery error", discoveryErr: fmt.Errorf("down"), wantErr: true},
@@ -920,18 +1013,11 @@ func Test_StartController(t *testing.T) {
 			name: "gateway+listenerset", resources: &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: "gateways"}, {Name: "listenersets"}}},
 			stubSetupWithManagerNil: true, wantCrdReady: true, wantLSEnabled: true,
 		},
-		{
-			name: "IndexField error", resources: &metav1.APIResourceList{APIResources: []metav1.APIResource{{Name: "gateways"}, {Name: "listenersets"}}},
-			indexFieldErr: fmt.Errorf("index failed"), wantErr: true, wantCrdReady: true, wantLSEnabled: true,
-		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r, _ := fakeGatewayReconciler(t)
 			r.discoveryClient = &fakeDiscoveryClient{resources: tt.resources, err: tt.discoveryErr}
 			mgr := &MockManager{client: r.Client, scheme: scheme}
-			if tt.indexFieldErr != nil {
-				mgr.indexer = &mockFieldIndexer{err: tt.indexFieldErr}
-			}
 			if tt.stubSetupWithManagerNil {
 				p := gomonkey.ApplyPrivateMethod(reflect.TypeOf(r), "setupWithManager",
 					func(_ *GatewayReconciler, _ ctrl.Manager) error { return nil })
@@ -948,3 +1034,18 @@ func Test_StartController(t *testing.T) {
 		})
 	}
 }
+
+// Test_StartController_IndexFieldError is isolated from Test_StartController so gomonkey patches
+// on setupWithManager from other table cases cannot affect this scenario.
+func Test_StartController_IndexFieldError(t *testing.T) {
+	r, _ := fakeGatewayReconciler(t)
+	r.discoveryClient = &fakeDiscoveryClient{resources: &metav1.APIResourceList{APIResources: []metav1.APIResource{
+		{Name: "gateways"}, {Name: "listenersets"},
+	}}}
+	mgr := &MockManager{client: r.Client, scheme: scheme, indexer: &mockFieldIndexer{err: fmt.Errorf("index failed")}}
+	err := r.StartController(mgr, nil)
+	assert.Error(t, err)
+	assert.True(t, r.crdReady)
+	assert.True(t, r.listenerSetEnabled)
+}
+

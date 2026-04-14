@@ -96,12 +96,18 @@ const (
 	TagScopeDNSRecordFor               string = "nsx-op/dnsrecord_for" // value: gateway, listenerset, lbservice
 	TagScopeListenerSetUID             string = "nsx-op/listenerset_uid"
 	TagScopeListenerSetName            string = "nsx-op/listenerset_name"
+	TagScopeHTTPRouteUID               string = "nsx-op/httproute_uid"
+	TagScopeGRPCRouteUID               string = "nsx-op/grpcroute_uid"
+	TagScopeTLSRouteUID                string = "nsx-op/tlsroute_uid"
 	TagScopeGatewayUID                 string = "nsx-op/gateway_uid"
 	TagScopeGatewayName                string = "nsx-op/gateway_name"
 	TagScopeGatewayNamespace           string = "nsx-op/gateway_namespace"
 	TagScopeServiceUID                 string = "nsx-op/service_uid"
 	TagValueDNSRecordForGateway        string = "gateway"
 	TagValueDNSRecordForListenerSet    string = "listenerset"
+	TagValueDNSRecordForHTTPRoute      string = "httproute"
+	TagValueDNSRecordForGRPCRoute      string = "grpcroute"
+	TagValueDNSRecordForTLSRoute       string = "tlsroute"
 	TagValueDNSRecordForService        string = "service"
 
 	TagValueL3InVlanBackedVPCMode  string = "WCP_L3_SUBNET_IN_VLAN_BACKED_VPC_MODE"

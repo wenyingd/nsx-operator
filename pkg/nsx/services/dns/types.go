@@ -4,34 +4,32 @@
 package dns
 
 import (
-	"net"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	extdns "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/endpoint"
 )
 
 const (
 	ResourceKindGateway     = "Gateway"
 	ResourceKindListenerSet = "ListenerSet"
+	ResourceKindHTTPRoute   = "HTTPRoute"
+	ResourceKindGRPCRoute   = "GRPCRoute"
+	ResourceKindTLSRoute    = "TLSRoute"
 	ResourceKindService     = "Service"
 )
 
 // ResourceRef identifies a K8s resource by Kind, Namespace, Name, and UID.
-// Used for both the address provider (e.g. Gateway) and the owner (Gateway or ListenerSet) of a Record.
+// Used for both the address provider (e.g. Gateway) and the owner of a DNS batch.
 type ResourceRef struct {
 	metav1.Object
 	Kind string
 }
 
-// Record represents one desired DNS mapping: a set of IPs (from the Gateway) and FQDNs
-// (from Gateway or ListenerSet listeners), with references to the address provider and owner.
-type Record struct {
-	// Addresses are the IPs for A/AAAA records (from Gateway status.Addresses).
-	Addresses []net.IP
-	// Hostnames are the FQDNs to map (from Gateway or ListenerSet listener hostnames).
-	Hostnames []string
-	// AddressProvider identifies the resource that provides the IPs (the Gateway or Service).
+// OwnerEndpoints groups ExternalDNS-style Endpoints for one Kubernetes owner
+// (Gateway, ListenerSet, or Route), sharing the same address provider (typically the Gateway).
+type OwnerEndpoints struct {
 	AddressProvider *ResourceRef
-	// Owner identifies the resource that owns this record (Gateway or ListenerSet or Service).
-	Owner        *ResourceRef
-	ForSVService bool
+	Owner           *ResourceRef
+	ForSVService    bool
+	Endpoints       []*extdns.Endpoint
 }
