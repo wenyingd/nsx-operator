@@ -5,25 +5,32 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/version"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	"github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 	"github.com/vmware-tanzu/nsx-operator/pkg/controllers/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	"github.com/vmware-tanzu/nsx-operator/pkg/metrics"
 	_ "github.com/vmware-tanzu/nsx-operator/pkg/nsx/ratelimiter"
 	servicecommon "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/dns"
 )
 
 var (
@@ -35,10 +42,11 @@ var (
 
 // ServiceLbReconciler reconciles a Service LoadBalancer object
 type ServiceLbReconciler struct {
-	Client   client.Client
-	Scheme   *apimachineryruntime.Scheme
-	Service  *servicecommon.Service
-	Recorder record.EventRecorder
+	Client           client.Client
+	Scheme           *apimachineryruntime.Scheme
+	Service          *servicecommon.Service
+	DNS dns.DNSRecordProvider
+	Recorder         record.EventRecorder
 }
 
 func updateSuccess(r *ServiceLbReconciler, c context.Context, lbService *v1.Service) error {
@@ -63,24 +71,58 @@ func (r *ServiceLbReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Client.Get(ctx, req.NamespacedName, service); err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("Not found LB service", "req", req.NamespacedName)
-			return ResultNormal, client.IgnoreNotFound(err)
+			if _, delErr := r.DNS.DeleteRecordByOwnerNN(ctx, dns.ResourceKindService, req.Namespace, req.Name); delErr != nil {
+				log.Error(delErr, "Failed to delete DNS records for Service", "Namespace", req.Namespace, "Name", req.Name)
+				return common.ResultRequeueAfter10sec, delErr
+			}
+			return ResultNormal, nil
 		}
 		log.Error(err, "Failed to fetch LB service", "req", req.NamespacedName)
 		return common.ResultRequeueAfter10sec, err
 	}
 
-	if service.Spec.Type == v1.ServiceTypeLoadBalancer {
-		log.Info("Reconciling LB service", "LBService", req.NamespacedName)
-		log.Debug("Reconciling LB Service", "name", service.Name, "version", service.ResourceVersion, "status", service.Status)
-		metrics.CounterInc(r.Service.NSXConfig, metrics.ControllerSyncTotal, MetricResType)
-
-		if service.ObjectMeta.DeletionTimestamp.IsZero() {
-			metrics.CounterInc(r.Service.NSXConfig, metrics.ControllerUpdateTotal, MetricResType)
-			err := updateSuccess(r, ctx, service)
-			if err != nil {
-				log.Error(err, "Failed to update LB service", "Name", service.Name, "Namespace", service.Namespace)
-				return common.ResultRequeueAfter10sec, err
+	if service.Spec.Type != v1.ServiceTypeLoadBalancer || !service.ObjectMeta.DeletionTimestamp.IsZero() {
+		// Try to delete DNS records for Service when it is not a LoadBalancer or is marked for deletion
+		if _, err := r.DNS.DeleteRecordByOwnerNN(ctx, dns.ResourceKindService, service.Namespace, service.Name); err != nil {
+			if uerr := r.updateServiceDNSReadyCondition(ctx, req.NamespacedName, err); uerr != nil {
+				log.Error(uerr, "Failed to update Service DNS Ready condition", "Service", req.NamespacedName.String())
 			}
+			log.Error(err, "Failed to delete DNS records for Service", "Namespace", service.Namespace, "Name", service.Name)
+			return common.ResultRequeueAfter10sec, err
+		}
+		if uerr := r.removeServiceDNSReadyCondition(ctx, req.NamespacedName); uerr != nil {
+			log.Error(uerr, "Failed to clear Service DNS Ready condition", "Service", req.NamespacedName.String())
+			return common.ResultRequeueAfter10sec, uerr
+		}
+		return ResultNormal, nil
+	}
+
+	log.Info("Reconciling LB service", "LBService", req.NamespacedName)
+	log.Debug("Reconciling LB Service", "name", service.Name, "version", service.ResourceVersion, "status", service.Status)
+	metrics.CounterInc(r.Service.NSXConfig, metrics.ControllerSyncTotal, MetricResType)
+
+	metrics.CounterInc(r.Service.NSXConfig, metrics.ControllerUpdateTotal, MetricResType)
+	if err := updateSuccess(r, ctx, service); err != nil {
+		log.Error(err, "Failed to update LB service", "Name", service.Name, "Namespace", service.Namespace)
+		return common.ResultRequeueAfter10sec, err
+	}
+	published, err := r.reconcileLoadBalancerServiceDNS(ctx, service)
+	if err != nil {
+		if uerr := r.updateServiceDNSReadyCondition(ctx, req.NamespacedName, err); uerr != nil {
+			log.Error(uerr, "Failed to update Service DNS Ready condition", "Service", req.NamespacedName.String())
+		}
+		log.Error(err, "Failed to reconcile DNS for LoadBalancer Service", "Name", service.Name, "Namespace", service.Namespace)
+		return common.ResultRequeueAfter10sec, err
+	}
+	if published {
+		if uerr := r.updateServiceDNSReadyCondition(ctx, req.NamespacedName, nil); uerr != nil {
+			log.Error(uerr, "Failed to update Service DNS Ready condition", "Service", req.NamespacedName.String())
+			return common.ResultRequeueAfter10sec, uerr
+		}
+	} else {
+		if uerr := r.removeServiceDNSReadyCondition(ctx, req.NamespacedName); uerr != nil {
+			log.Error(uerr, "Failed to clear Service DNS Ready condition", "Service", req.NamespacedName.String())
+			return common.ResultRequeueAfter10sec, uerr
 		}
 	}
 
@@ -119,13 +161,18 @@ func (r *ServiceLbReconciler) setServiceLbStatus(ctx context.Context, lbService 
 }
 
 func (r *ServiceLbReconciler) setupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&v1.Service{}).
+		Watches(
+			&v1alpha1.NetworkInfo{},
+			handler.EnqueueRequestsFromMapFunc(r.enqueueLBServiceRequestsFromNetworkInfo),
+			builder.WithPredicates(predicateNetworkInfoAllowedDNSDomainsChanged()),
+		).
 		WithOptions(
 			controller.Options{
 				MaxConcurrentReconciles: common.NumReconcile(),
-			}).
-		Complete(r)
+			})
+	return b.Complete(r)
 }
 
 // Start setup manager
@@ -172,18 +219,73 @@ func (r *ServiceLbReconciler) StartController(mgr ctrl.Manager, _ webhook.Server
 		log.Error(err, "Failed to create controller", "controller", "ServiceLb")
 		return err
 	}
+	go common.GenericGarbageCollector(make(chan bool), servicecommon.GCInterval, r.CollectGarbage)
 	return nil
+}
+
+// listLoadBalancerServicesWithDNSAnnotation returns Service NNs that should retain DNS rows (LB, not terminating, hostname annotation).
+func listLoadBalancerServicesWithDNSAnnotation(ctx context.Context, c client.Client) (sets.Set[types.NamespacedName], error) {
+	svcList := &v1.ServiceList{}
+	if err := c.List(ctx, svcList); err != nil {
+		return nil, err
+	}
+	nnSet := sets.New[types.NamespacedName]()
+	for i := range svcList.Items {
+		svc := &svcList.Items[i]
+		if svc.Spec.Type != v1.ServiceTypeLoadBalancer || !svc.ObjectMeta.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if len(parseDNSHostnamesFromServiceAnnotation(svc.GetAnnotations())) == 0 {
+			continue
+		}
+		nnSet.Insert(types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name})
+	}
+	return nnSet, nil
 }
 
 func (r *ServiceLbReconciler) CollectGarbage(ctx context.Context) error {
+	if r.DNS == nil {
+		return nil
+	}
+	apiSet, err := listLoadBalancerServicesWithDNSAnnotation(ctx, r.Client)
+	if err != nil {
+		log.Error(err, "Service LB GC: failed to list Services")
+		return err
+	}
+	ownersByKind := r.DNS.ListRecordOwnerResource()
+	cachedServices := ownersByKind[dns.ResourceKindService]
+	var errs []error
+	for nn := range cachedServices {
+		if apiSet.Has(nn) {
+			continue
+		}
+		if _, err := r.DNS.DeleteRecordByOwnerNN(ctx, dns.ResourceKindService, nn.Namespace, nn.Name); err != nil {
+			log.Error(err, "Service LB GC: failed to delete DNS records for Service owner missing from API or no longer eligible",
+				"Namespace", nn.Namespace, "Name", nn.Name)
+			errs = append(errs, err)
+			continue
+		}
+		if err := r.removeServiceDNSReadyCondition(ctx, nn); err != nil {
+			log.Error(err, "Service LB GC: failed to clear Service DNS Ready condition", "Namespace", nn.Namespace, "Name", nn.Name)
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("service LB garbage collection encountered %d error(s): %v", len(errs), errs)
+	}
 	return nil
 }
 
-func NewServiceLbReconciler(mgr ctrl.Manager, commonService servicecommon.Service) *ServiceLbReconciler {
+func NewServiceLbReconciler(mgr ctrl.Manager, commonService servicecommon.Service, dnsRecordService *dns.DNSRecordService) *ServiceLbReconciler {
 	if isServiceLbStatusIpModeSupported(mgr.GetConfig()) {
+		var dnsProv dns.DNSRecordProvider
+		if dnsRecordService != nil {
+			dnsProv = dnsRecordService
+		}
 		serviceLbReconciler := &ServiceLbReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
+			DNS:      dnsProv,
 			Recorder: mgr.GetEventRecorderFor("serviceLb-controller"),
 		}
 		serviceLbReconciler.Service = &commonService

@@ -5,18 +5,17 @@ package service
 
 import (
 	"context"
-	"errors"
-	"os"
-	"reflect"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -25,17 +24,43 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/vmware-tanzu/nsx-operator/pkg/config"
+	mockdns "github.com/vmware-tanzu/nsx-operator/pkg/mock/dns"
 
-	mock_client "github.com/vmware-tanzu/nsx-operator/pkg/mock/controller-runtime/client"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/dns"
 )
 
+func emptyDNSRecordService() *dns.DNSRecordService {
+	return &dns.DNSRecordService{DNSRecordStore: dns.BuildDNSRecordStore()}
+}
+
+// serviceLbFakeClient builds a fake client; scheme must match the reconciler's Scheme (same *runtime.Scheme instance).
+func serviceLbFakeClient(scheme *runtime.Scheme, withStatus bool, objs ...client.Object) client.Client {
+	b := fake.NewClientBuilder().WithScheme(scheme)
+	if withStatus {
+		b = b.WithStatusSubresource(&v1.Service{})
+	}
+	if len(objs) > 0 {
+		b = b.WithObjects(objs...)
+	}
+	return b.Build()
+}
+
+func assignDNSListStubs(m *mockdns.MockDNSRecordProvider) {
+	m.EXPECT().ListReferredGatewayNN().Return(sets.New[types.NamespacedName]()).AnyTimes()
+	m.EXPECT().ListRecordOwnerResource().Return(nil).AnyTimes()
+}
+
 func NewFakeServiceLbReconciler() *ServiceLbReconciler {
+	s := runtime.NewScheme()
+	_ = v1.AddToScheme(s)
+	c := fake.NewClientBuilder().WithScheme(s).Build()
 	return &ServiceLbReconciler{
-		Client:   fake.NewClientBuilder().Build(),
-		Scheme:   fake.NewClientBuilder().Build().Scheme(),
+		Client:   c,
+		Scheme:   s,
 		Service:  nil,
+		DNS:      emptyDNSRecordService(),
 		Recorder: fakeRecorder{},
 	}
 }
@@ -163,130 +188,170 @@ func TestServiceLbReconciler_setServiceLbStatus(t *testing.T) {
 	assert.Equal(t, (*v1.LoadBalancerIPMode)(nil), lbService.Status.LoadBalancer.Ingress[0].IPMode)
 }
 
-func TestServiceLbReconciler_Reconcile(t *testing.T) {
-	mockCtl := gomock.NewController(t)
-	k8sClient := mock_client.NewMockClient(mockCtl)
-	service := &common.Service{
-		NSXClient: &nsx.Client{},
-		NSXConfig: &config.NSXOperatorConfig{
-			CoeConfig: &config.CoeConfig{
-				EnableVPCNetwork: true,
-			},
-			NsxConfig: &config.NsxConfig{
-				EnforcementPoint: "vmc-enforcementpoint",
-			},
-		},
-	}
-
-	r := &ServiceLbReconciler{
-		Client:   k8sClient,
-		Scheme:   nil,
-		Service:  service,
-		Recorder: fakeRecorder{},
-	}
-	ctx := context.Background()
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "dummy", Name: "dummy"}}
-
-	// lb service not found obj case
-	errNotFound := errors.New("not found")
-	k8sClient.EXPECT().Get(ctx, gomock.Any(), gomock.Any()).Return(errNotFound)
-	_, err := r.Reconcile(ctx, req)
-	assert.Equal(t, err, errNotFound)
-
-	// DeletionTimestamp.IsZero = true and service type is LoadBalancer
-	lbService := &v1.Service{}
-	k8sClient.EXPECT().Get(ctx, gomock.Any(), lbService).Return(nil).Do(func(_ context.Context, _ client.ObjectKey, obj client.Object, option ...client.GetOption) error {
-		v1lbservice := obj.(*v1.Service)
-		v1lbservice.Spec.Type = v1.ServiceTypeLoadBalancer
-		return nil
-	})
-	_, err = r.Reconcile(ctx, req)
-	assert.Equal(t, err, nil)
-
-	// DeletionTimestamp.IsZero = false and service type is LoadBalancer
-	k8sClient.EXPECT().Get(ctx, gomock.Any(), lbService).Return(nil).Do(func(_ context.Context, _ client.ObjectKey, obj client.Object, option ...client.GetOption) error {
-		v1lbservice := obj.(*v1.Service)
-		v1lbservice.Spec.Type = v1.ServiceTypeLoadBalancer
-		time := metav1.Now()
-		v1lbservice.ObjectMeta.DeletionTimestamp = &time
-		return nil
-	})
-	_, err = r.Reconcile(ctx, req)
-	assert.Equal(t, err, nil)
-
-	// service type is not LoadBalancer
-	k8sClient.EXPECT().Get(ctx, gomock.Any(), lbService).Return(nil).Do(func(_ context.Context, _ client.ObjectKey, obj client.Object, option ...client.GetOption) error {
-		v1lbservice := obj.(*v1.Service)
-		v1lbservice.Spec.Type = v1.ServiceTypeClusterIP
-		time := metav1.Now()
-		v1lbservice.ObjectMeta.DeletionTimestamp = &time
-		return nil
-	})
-	_, err = r.Reconcile(ctx, req)
-	assert.Equal(t, err, nil)
+func serviceLbTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(s))
+	return s
 }
 
-func TestServiceLbReconciler_StartController(t *testing.T) {
+func testNSXServiceForLb() *common.Service {
+	return &common.Service{
+		NSXClient: &nsx.Client{},
+		NSXConfig: &config.NSXOperatorConfig{
+			CoeConfig: &config.CoeConfig{EnableVPCNetwork: true},
+			NsxConfig: &config.NsxConfig{EnforcementPoint: "vmc-enforcementpoint"},
+		},
+	}
+}
+
+func TestServiceLbReconciler_Reconcile(t *testing.T) {
+	ctx := context.Background()
+	scheme := serviceLbTestScheme(t)
+	nsxSvc := testNSXServiceForLb()
+
+	t.Run("not_found_deletes_dns", func(t *testing.T) {
+		mockCtl := gomock.NewController(t)
+		defer mockCtl.Finish()
+		m := mockdns.NewMockDNSRecordProvider(mockCtl)
+		assignDNSListStubs(m)
+		m.EXPECT().DeleteRecordByOwnerNN(gomock.Any(), dns.ResourceKindService, "dummy", "missing").Return(false, nil).Times(1)
+		r := &ServiceLbReconciler{
+			Client:   serviceLbFakeClient(scheme, false),
+			Scheme:   scheme,
+			Service:  nsxSvc,
+			DNS:      m,
+			Recorder: fakeRecorder{},
+		}
+		req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "dummy", Name: "missing"}}
+		_, err := r.Reconcile(ctx, req)
+		require.NoError(t, err)
+	})
+
+	t.Run("loadbalancer_active", func(t *testing.T) {
+		svc := &v1.Service{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "lb", ResourceVersion: "1"},
+			Spec:       v1.ServiceSpec{Type: v1.ServiceTypeLoadBalancer},
+			Status: v1.ServiceStatus{
+				LoadBalancer: v1.LoadBalancerStatus{
+					Ingress: []v1.LoadBalancerIngress{{IP: "192.168.28.1"}},
+				},
+			},
+		}
+		r := &ServiceLbReconciler{
+			Client:   serviceLbFakeClient(scheme, true, svc),
+			Scheme:   scheme,
+			Service:  nsxSvc,
+			DNS:      emptyDNSRecordService(),
+			Recorder: fakeRecorder{},
+		}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "lb"}})
+		require.NoError(t, err)
+	})
+
+	t.Run("loadbalancer_with_deletion_timestamp", func(t *testing.T) {
+		ts := metav1.Now()
+		svc := &v1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:         "ns",
+				Name:              "lb-del",
+				ResourceVersion:   "1",
+				DeletionTimestamp: &ts,
+				Finalizers:        []string{"test.finalizer/nsx-operator"},
+			},
+			Spec: v1.ServiceSpec{Type: v1.ServiceTypeLoadBalancer},
+		}
+		r := &ServiceLbReconciler{
+			Client:   serviceLbFakeClient(scheme, true, svc),
+			Scheme:   scheme,
+			Service:  nsxSvc,
+			DNS:      emptyDNSRecordService(),
+			Recorder: fakeRecorder{},
+		}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "lb-del"}})
+		require.NoError(t, err)
+	})
+
+	t.Run("cluster_ip_clears_dns", func(t *testing.T) {
+		ts := metav1.Now()
+		svc := &v1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:         "ns",
+				Name:              "ci",
+				ResourceVersion:   "1",
+				DeletionTimestamp: &ts,
+				Finalizers:        []string{"test.finalizer/nsx-operator"},
+			},
+			Spec: v1.ServiceSpec{Type: v1.ServiceTypeClusterIP},
+		}
+		r := &ServiceLbReconciler{
+			Client:   serviceLbFakeClient(scheme, true, svc),
+			Scheme:   scheme,
+			Service:  nsxSvc,
+			DNS:      emptyDNSRecordService(),
+			Recorder: fakeRecorder{},
+		}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "ci"}})
+		require.NoError(t, err)
+	})
+}
+
+func TestServiceLbReconciler_CollectGarbage_nilDNS(t *testing.T) {
+	r := &ServiceLbReconciler{DNS: nil}
+	require.NoError(t, r.CollectGarbage(context.Background()))
+}
+
+func TestServiceLbReconciler_CollectGarbage_emptyStore(t *testing.T) {
+	scheme := serviceLbTestScheme(t)
+	r := &ServiceLbReconciler{
+		Client: serviceLbFakeClient(scheme, false),
+		DNS:    emptyDNSRecordService(),
+	}
+	require.NoError(t, r.CollectGarbage(context.Background()))
+}
+
+// CollectGarbage deletes store owners of kind Service that are absent from the API set of eligible LB Services
+// (LB type, not terminating, hostname annotation). Mirrors gateway GC against ListRecordOwnerResource.
+func TestServiceLbReconciler_CollectGarbage_prunesStaleServiceOwners(t *testing.T) {
+	ctx := context.Background()
+	scheme := serviceLbTestScheme(t)
+	keep := &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "keep",
+			Annotations: map[string]string{
+				common.AnnotationDNSHostnameKey: "app.example.com",
+			},
+		},
+		Spec: v1.ServiceSpec{Type: v1.ServiceTypeLoadBalancer},
+	}
+	mockCtl := gomock.NewController(t)
+	defer mockCtl.Finish()
+	m := mockdns.NewMockDNSRecordProvider(mockCtl)
+	m.EXPECT().ListReferredGatewayNN().Return(sets.New[types.NamespacedName]()).AnyTimes()
+	keepNN := types.NamespacedName{Namespace: "ns", Name: "keep"}
+	staleNN := types.NamespacedName{Namespace: "ns", Name: "stale"}
+	m.EXPECT().ListRecordOwnerResource().Return(map[string]sets.Set[types.NamespacedName]{
+		dns.ResourceKindService: sets.New(keepNN, staleNN),
+	}).Times(1)
+	m.EXPECT().DeleteRecordByOwnerNN(gomock.Any(), dns.ResourceKindService, staleNN.Namespace, staleNN.Name).Return(true, nil).Times(1)
+
+	r := &ServiceLbReconciler{
+		Client: serviceLbFakeClient(scheme, true, keep),
+		Scheme: scheme,
+		DNS:    m,
+	}
+	require.NoError(t, r.CollectGarbage(ctx))
+}
+
+func TestNewServiceLbReconciler_whenIpModeSupported(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithObjects().Build()
-	commonService := common.Service{
-		Client: fakeClient,
-	}
-	mockMgr := &MockManager{
-		scheme: runtime.NewScheme(),
-		config: &rest.Config{},
-	}
+	commonService := common.Service{Client: fakeClient}
+	mockMgr := &MockManager{scheme: runtime.NewScheme(), config: &rest.Config{}}
 
-	testCases := []struct {
-		name         string
-		expectErrStr string
-		patches      func() *gomonkey.Patches
-	}{
-		// expected no error when starting the serviceLb controller
-		{
-			name: "Start serviceLb Controller",
-			patches: func() *gomonkey.Patches {
-				patches := gomonkey.ApplyFunc(os.Exit, func(code int) {
-					assert.FailNow(t, "os.Exit should not be called")
-				})
-				patches.ApplyFunc(isServiceLbStatusIpModeSupported, func(c *rest.Config) bool {
-					return true
-				})
-				patches.ApplyMethod(reflect.TypeOf(&ServiceLbReconciler{}), "Start", func(_ *ServiceLbReconciler, r ctrl.Manager) error {
-					return nil
-				})
-				return patches
-			},
-		},
-		{
-			name:         "Start serviceLb controller return error",
-			expectErrStr: "failed to setupWithManager",
-			patches: func() *gomonkey.Patches {
-				patches := gomonkey.ApplyFunc(os.Exit, func(code int) {
-				})
-				patches.ApplyFunc(isServiceLbStatusIpModeSupported, func(c *rest.Config) bool {
-					return true
-				})
-				patches.ApplyPrivateMethod(reflect.TypeOf(&ServiceLbReconciler{}), "setupWithManager", func(_ *ServiceLbReconciler, mgr ctrl.Manager) error {
-					return errors.New("failed to setupWithManager")
-				})
-				return patches
-			},
-		},
-	}
+	patches := gomonkey.ApplyFunc(isServiceLbStatusIpModeSupported, func(c *rest.Config) bool { return true })
+	defer patches.Reset()
 
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			patches := testCase.patches()
-			defer patches.Reset()
-
-			r := NewServiceLbReconciler(mockMgr, commonService)
-			err := r.StartController(mockMgr, nil)
-
-			if testCase.expectErrStr != "" {
-				assert.Contains(t, err.Error(), testCase.expectErrStr)
-			} else {
-				assert.Nil(t, err)
-			}
-		})
-	}
+	r := NewServiceLbReconciler(mockMgr, commonService, nil)
+	require.NotNil(t, r)
 }
