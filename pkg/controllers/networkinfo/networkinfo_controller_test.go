@@ -38,6 +38,7 @@ import (
 	mock_client "github.com/vmware-tanzu/nsx-operator/pkg/mock/controller-runtime/client"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
 	servicecommon "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/dns"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/ipblocksinfo"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/vpc"
 	nsxutil "github.com/vmware-tanzu/nsx-operator/pkg/nsx/util"
@@ -128,11 +129,17 @@ func createNetworkInfoReconciler(objs []client.Object) *NetworkInfoReconciler {
 		},
 	}
 
+	dnsSvc, err := dns.InitializeDNSRecordService(service.Service, service)
+	if err != nil {
+		panic(err)
+	}
+
 	r := &NetworkInfoReconciler{
-		Client:   fakeClient,
-		Scheme:   fake.NewClientBuilder().Build().Scheme(),
-		Service:  service,
-		Recorder: &fakeRecorder{},
+		Client:           fakeClient,
+		Scheme:           fake.NewClientBuilder().Build().Scheme(),
+		Service:          service,
+		DNSRecordService: dnsSvc,
+		Recorder:         &fakeRecorder{},
 	}
 	r.StatusUpdater = common.NewStatusUpdater(r.Client, r.Service.NSXConfig, r.Recorder, MetricResType, "VPC", "NetworkInfo")
 	return r
@@ -155,8 +162,8 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 		{
 			name: "Empty",
 			prepareFunc: func(t *testing.T, r *NetworkInfoReconciler, ctx context.Context) (patches *gomonkey.Patches) {
-				patches = gomonkey.ApplyMethod(reflect.TypeOf(r.Service), "GetVPCsByNamespace", func(_ *vpc.VPCService, _ string) []*model.Vpc {
-					return []*model.Vpc{}
+				patches = gomonkey.ApplyPrivateMethod(reflect.TypeOf(r), "deleteVPCsByNamespace", func(_ *NetworkInfoReconciler, _ context.Context, _ string) error {
+					return nil
 				})
 				return patches
 			},
@@ -197,7 +204,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 						ServiceClusterReason:   servicecommon.ReasonServiceClusterNotSet,
 					}, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -269,7 +276,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 						ServiceClusterReady:     true,
 					}, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -345,7 +352,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 						ServiceClusterReason:   servicecommon.ReasonServiceClusterNotSet,
 					}, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -419,7 +426,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 						ServiceClusterReason:   servicecommon.ReasonServiceClusterNotSet,
 					}, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					assert.FailNow(t, "should not be called")
 					return &model.Vpc{}, nil
 				})
@@ -472,7 +479,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetNSXLBSNATIP", func(_ *vpc.VPCService, _ model.Vpc, _ string) (string, error) {
 					return "100.64.0.3", nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -564,7 +571,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetNSXLBSNATIP", func(_ *vpc.VPCService, _ model.Vpc, _ string) (string, error) {
 					return "100.64.0.3", nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -646,7 +653,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetNSXLBSNATIP", func(_ *vpc.VPCService, _ model.Vpc, _ string) (string, error) {
 					return "100.64.0.3", nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -732,7 +739,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetNSXLBSNATIP", func(_ *vpc.VPCService, _ model.Vpc, _ string) (string, error) {
 					return "100.64.0.3", nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -819,7 +826,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetNSXLBSNATIP", func(_ *vpc.VPCService, _ model.Vpc, _ string) (string, error) {
 					return "100.64.0.3", nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -899,7 +906,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetLBProvider", func(_ *vpc.VPCService) (vpc.LBProvider, error) {
 					return vpc.AVILB, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -963,7 +970,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetLBProvider", func(_ *vpc.VPCService) (vpc.LBProvider, error) {
 					return vpc.NSXLB, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -1038,7 +1045,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetLBProvider", func(_ *vpc.VPCService) (vpc.LBProvider, error) {
 					return vpc.AVILB, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -1100,7 +1107,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 					return vpc.AVILB, nil
 				})
 				// Return VPC with LoadBalancerVpcEndpoint.Enabled = true to trigger AVI LB path retrieval
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -1170,7 +1177,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetLBProvider", func(_ *vpc.VPCService) (vpc.LBProvider, error) {
 					return vpc.NSXLB, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -1242,7 +1249,7 @@ func TestNetworkInfoReconciler_Reconcile(t *testing.T) {
 				patches.ApplyMethod(reflect.TypeOf(r.Service), "GetLBProvider", func(_ *vpc.VPCService) (vpc.LBProvider, error) {
 					return vpc.NSXLB, nil
 				})
-				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider) (*model.Vpc, error) {
+				patches.ApplyMethod(reflect.TypeOf(r.Service), "CreateOrUpdateVPC", func(_ *vpc.VPCService, ctx context.Context, _ *v1alpha1.NetworkInfo, _ *v1alpha1.VPCNetworkConfiguration, _ vpc.LBProvider, _ bool, _ bool) (*model.Vpc, error) {
 					return &model.Vpc{
 						DisplayName: servicecommon.String("vpc-name"),
 						Path:        servicecommon.String("/orgs/default/projects/project-quality/vpcs/fake-vpc"),
@@ -1890,8 +1897,10 @@ func TestNetworkInfoReconciler_StartController(t *testing.T) {
 	patches.ApplyFunc(common.GenericGarbageCollector, func(cancel chan bool, timeout time.Duration, f func(ctx context.Context) error) {
 	})
 	defer patches.Reset()
-	r := NewNetworkInfoReconciler(mockMgr, vpcService, ipblocksInfoService)
-	err := r.StartController(mockMgr, nil)
+	dnsSvc, err := dns.InitializeDNSRecordService(vpcService.Service, vpcService)
+	require.NoError(t, err)
+	r := NewNetworkInfoReconciler(mockMgr, vpcService, ipblocksInfoService, dnsSvc)
+	err = r.StartController(mockMgr, nil)
 	assert.Nil(t, err)
 	// Sleep to make sure the patches are reset after the goroutine in StartController get executed
 	time.Sleep(time.Second)

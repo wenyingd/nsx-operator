@@ -33,6 +33,7 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx"
 	_ "github.com/vmware-tanzu/nsx-operator/pkg/nsx/ratelimiter"
 	commonservice "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
+	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/dns"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/ipblocksinfo"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/vpc"
 	nsxutil "github.com/vmware-tanzu/nsx-operator/pkg/nsx/util"
@@ -70,6 +71,7 @@ var (
 	nsMsgVPCAutoSNATDisabled      = newNsUnreadyMessage("SNAT is not enabled in System VPC", NSReasonVPCSnatNotReady)
 	nsMsgVPCDefaultSNATIPGetError = newNsUnreadyMessage("Default SNAT IP is not allocated in VPC: %v", NSReasonVPCSnatNotReady)
 	nsMsgVPCIsReady               = newNsUnreadyMessage("", "")
+	nsMsgVPCDNSZonesSyncError     = newNsUnreadyMessage("Failed to sync permitted DNS zones from NSX: %v", NSReasonVPCNotReady)
 )
 
 type nsUnreadyMessage struct {
@@ -103,6 +105,7 @@ type NetworkInfoReconciler struct {
 	Client              client.Client
 	Scheme              *apimachineryruntime.Scheme
 	Service             *vpc.VPCService
+	DNSRecordService    *dns.DNSRecordService
 	IPBlocksInfoService *ipblocksinfo.IPBlocksInfoService
 	Recorder            record.EventRecorder
 	queue               workqueue.TypedRateLimitingInterface[reconcile.Request]
@@ -430,9 +433,20 @@ func (r *NetworkInfoReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		NetworkStack:            networkStack,
 	}
 
+	var allowedDNSDomains []string
+	if len(nc.Spec.DNSZones) > 0 {
+		zoneMap, err := r.DNSRecordService.SyncDNSZonesByVpcNetworkConfig(nc)
+		if err != nil {
+			r.StatusUpdater.UpdateFail(ctx, networkInfoCR, err, "Failed to sync DNS zones for VPC network configuration", setNetworkInfoVPCStatusWithError, state)
+			setNSNetworkReadyCondition(ctx, r.Client, req.Namespace, nsMsgVPCDNSZonesSyncError.getNSNetworkCondition(err))
+			return common.ResultRequeueAfter10sec, err
+		}
+		allowedDNSDomains = dns.DomainNamesInSpecOrder(zoneMap, nc.Spec.DNSZones)
+	}
+
 	// AKO needs to know the AVI subnet path created by NSX
 	setVPCNetworkConfigurationStatusWithLBS(ctx, r.Client, ncName, state.Name, aviSubnetPath, nsxLBSPath, *createdVpc.Path)
-	r.StatusUpdater.UpdateSuccess(ctx, networkInfoCR, setNetworkInfoVPCStatus, state)
+	r.StatusUpdater.UpdateSuccess(ctx, networkInfoCR, setNetworkInfoVPCStatus, state, allowedDNSDomains)
 
 	if retryWithSystemVPC {
 		setNSNetworkReadyCondition(ctx, r.Client, req.Namespace, systemNSCondition)
@@ -805,11 +819,12 @@ func (r *NetworkInfoReconciler) StartController(mgr ctrl.Manager, _ webhook.Serv
 	return nil
 }
 
-func NewNetworkInfoReconciler(mgr ctrl.Manager, vpcService *vpc.VPCService, ipblocksInfoService *ipblocksinfo.IPBlocksInfoService) *NetworkInfoReconciler {
+func NewNetworkInfoReconciler(mgr ctrl.Manager, vpcService *vpc.VPCService, ipblocksInfoService *ipblocksinfo.IPBlocksInfoService, dnsRecordService *dns.DNSRecordService) *NetworkInfoReconciler {
 	networkInfoReconciler := &NetworkInfoReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("networkinfo-controller"),
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		DNSRecordService: dnsRecordService,
+		Recorder:         mgr.GetEventRecorderFor("networkinfo-controller"),
 	}
 	networkInfoReconciler.Service = vpcService
 	networkInfoReconciler.IPBlocksInfoService = ipblocksInfoService

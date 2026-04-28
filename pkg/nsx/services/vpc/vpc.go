@@ -924,6 +924,9 @@ func (s *VPCService) ListVPCInfo(ns string) []common.VPCResourceInfo {
 }
 
 func (s *VPCService) GetDefaultNSXLBSPathByVPC(vpcID string) string {
+	if s == nil || s.LbsStore == nil {
+		return ""
+	}
 	vpcLBS := s.LbsStore.GetByKey(vpcID)
 	if vpcLBS == nil {
 		return ""

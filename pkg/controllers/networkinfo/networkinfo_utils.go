@@ -21,29 +21,46 @@ func setNetworkInfoVPCStatusWithError(client client.Client, ctx context.Context,
 }
 
 func setNetworkInfoVPCStatus(client client.Client, ctx context.Context, obj client.Object, _ metav1.Time, args ...interface{}) {
-	if len(args) != 1 {
+	if len(args) < 1 {
 		log.Error(nil, "VPC State is needed when updating NetworkInfo status")
 		return
 	}
 	networkInfo := obj.(*v1alpha1.NetworkInfo)
-	var createdVPC *v1alpha1.VPCState
 	if args[0] == nil {
 		// Not clear the existing VPC in NetworkInfo as
 		// currently one Namespace only maps to one VPC
 		return
-	} else {
-		createdVPC = args[0].(*v1alpha1.VPCState)
 	}
+	createdVPC := args[0].(*v1alpha1.VPCState)
+
+	var allowedDNSDomains []string
+	updateAllowedDomains := false
+	if len(args) >= 2 {
+		if d, ok := args[1].([]string); ok {
+			allowedDNSDomains = d
+			updateAllowedDomains = true
+		}
+	}
+
 	existingVPC := &v1alpha1.VPCState{}
 	if len(networkInfo.VPCs) > 0 {
 		existingVPC = &networkInfo.VPCs[0]
 	}
 	slices.Sort(existingVPC.PrivateIPs)
 	slices.Sort(createdVPC.PrivateIPs)
-	if reflect.DeepEqual(*existingVPC, *createdVPC) {
+
+	domainsEqual := true
+	if updateAllowedDomains {
+		domainsEqual = slices.Equal(networkInfo.AllowedDNSDomains, allowedDNSDomains)
+	}
+
+	if reflect.DeepEqual(*existingVPC, *createdVPC) && domainsEqual {
 		return
 	}
 	networkInfo.VPCs = []v1alpha1.VPCState{*createdVPC}
+	if updateAllowedDomains {
+		networkInfo.AllowedDNSDomains = allowedDNSDomains
+	}
 	client.Update(ctx, networkInfo)
 }
 
