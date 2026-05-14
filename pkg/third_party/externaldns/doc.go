@@ -19,7 +19,7 @@
 //   - [github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/endpoint]: subset of external-dns/endpoint
 //     (see endpoint/doc.go for omissions vs upstream).
 //   - [github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/source]: stateless helpers and types
-//     factored from external-dns/source/gateway.go (see source/doc.go); no informers or template engine.
+//     factored from external-dns/source/gateway.go; no informers or template engine.
 //     gateway_host_matching.go holds GwMatchingHost / GatewayCanonicalHost (from upstream gateway.go) plus
 //     nsx-operator-only ClaimGwMatchingDNSName for ordered Gateway direct-DNS batch dedupe.
 //   - [github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/provider]: ZoneIDName / FindZone from
