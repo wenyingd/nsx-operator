@@ -250,6 +250,7 @@ func startServiceController(mgr manager.Manager, nsxClient *nsx.Client) {
 			pod.NewPodReconciler(mgr, subnetPortService, subnetService, vpcService, nodeService),
 			networkpolicycontroller.NewNetworkPolicyReconciler(mgr, commonService, vpcService),
 			gateway.NewGatewayReconciler(mgr, dnsRecordService),
+			service.NewServiceLbReconciler(mgr, commonService, dnsRecordService),
 			subnetbindingcontroller.NewReconciler(mgr, subnetService, subnetBindingService),
 			subnetipreservationcontroller.NewReconciler(mgr, subnetIPReservationService, subnetService),
 		)
