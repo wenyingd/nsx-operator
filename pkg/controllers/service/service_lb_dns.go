@@ -72,17 +72,33 @@ func targetsFromLoadBalancerIngress(ingress []v1.LoadBalancerIngress) extdns.Tar
 	return extdns.NewTargets(vals...)
 }
 
+// isOwnedByGateway reports whether any ownerReference has the given Kind.
+func isOwnedByGateway(ownerRefs []metav1.OwnerReference) bool {
+	for i := range ownerRefs {
+		if ownerRefs[i].Kind == "Gateway" {
+			return true
+		}
+	}
+	return false
+}
+
 // buildLoadBalancerServiceDNSBatch builds owner-scoped DNS rows for a LoadBalancer Service: annotation hostnames,
 // targets from LB ingress, then ValidateEndpointsByZone for namespace VPC policy.
-func buildLoadBalancerServiceDNSBatch(svc *v1.Service, w dns.DNSRecordProvider) (*dns.AggregatedDNSEndpoints, map[string]string, error) {
+// Services whose ownerReference points to a K8s Gateway are skipped to avoid duplicate DNS records
+// with Gateway-direct annotation DNS managed by the gateway reconciler.
+func buildLoadBalancerServiceDNSBatch(svc *v1.Service, w dns.DNSRecordProvider) (*dns.AggregatedDNSEndpoints, error) {
+	if isOwnedByGateway(svc.GetOwnerReferences()) {
+		log.Debug("Skipping DNS batch for LB service owned by a Gateway", "namespace", svc.Namespace, "name", svc.Name)
+		return nil, nil
+	}
 	hostnames := parseDNSHostnamesFromAnnotation(svc.GetAnnotations())
 	if len(hostnames) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	targets := targetsFromLoadBalancerIngress(svc.Status.LoadBalancer.Ingress)
 	if len(targets) == 0 {
 		log.Debug("LB service has hostname annotation but no ingress targets yet", "namespace", svc.Namespace, "name", svc.Name)
-		return nil, nil, nil
+		return nil, nil
 	}
 	log.Debug("Building DNS batch for LB service", "namespace", svc.Namespace, "name", svc.Name,
 		"hostnames", len(hostnames), "targets", len(targets))
@@ -98,18 +114,18 @@ func buildLoadBalancerServiceDNSBatch(svc *v1.Service, w dns.DNSRecordProvider) 
 		}
 	}
 	if len(eps) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	owner := &dns.ResourceRef{Kind: dns.ResourceKindService, Object: svc.GetObjectMeta()}
-	rows, allowed, err := w.ValidateEndpointsByZone(svc.Namespace, owner, eps)
+	rows, _, err := w.ValidateEndpointsByZone(svc.Namespace, owner, eps)
 	if err != nil {
-		return nil, allowed, err
+		return nil, err
 	}
 	if len(rows) == 0 {
-		return nil, allowed, nil
+		return nil, nil
 	}
 	log.Info("DNS batch built for LB service", "namespace", svc.Namespace, "name", svc.Name, "rows", len(rows))
-	return dns.NewOwnerScopedAggregatedRouteDNS(owner, rows), allowed, nil
+	return dns.NewOwnerScopedAggregatedRouteDNS(owner, rows), nil
 }
 
 func buildServiceDNSReadyCondition(err error) metav1.Condition {
@@ -163,7 +179,7 @@ func (r *ServiceLbReconciler) removeServiceDNSReadyCondition(ctx context.Context
 func (r *ServiceLbReconciler) reconcileLoadBalancerServiceDNS(ctx context.Context, svc *v1.Service) error {
 	svcNN := types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
 	log.Info("Reconciling DNS for LB service", "Service", svcNN)
-	batch, allowedZones, err := buildLoadBalancerServiceDNSBatch(svc, r.DNS)
+	batch, err := buildLoadBalancerServiceDNSBatch(svc, r.DNS)
 	if err != nil {
 		var zoneValErr *dns.DNSZoneValidationError
 		if errors.As(err, &zoneValErr) {
@@ -172,7 +188,7 @@ func (r *ServiceLbReconciler) reconcileLoadBalancerServiceDNS(ctx context.Contex
 				log.Error(uerr, "Failed to update DNS conditions", "Service", svcNN)
 				return uerr
 			}
-			if _, derr := r.DNS.DeleteRecordsForOwnerOutsideAllowedZones(ctx, dns.ResourceKindService, svc.Namespace, svc.Name, allowedZonePathSet(allowedZones)); derr != nil {
+			if _, derr := r.DNS.DeleteRecordByOwnerNN(ctx, dns.ResourceKindService, svc.Namespace, svc.Name); derr != nil {
 				log.Error(derr, "Failed to clean up the disallowed DNS records", "Service", svcNN)
 				return derr
 			}

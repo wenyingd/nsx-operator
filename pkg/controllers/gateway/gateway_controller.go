@@ -37,6 +37,7 @@ import (
 	"github.com/vmware-tanzu/nsx-operator/pkg/logger"
 	servicecommon "github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/common"
 	"github.com/vmware-tanzu/nsx-operator/pkg/nsx/services/dns"
+	extannotations "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/annotations"
 	extdns "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/endpoint"
 	extdnssrc "github.com/vmware-tanzu/nsx-operator/pkg/third_party/externaldns/source"
 )
@@ -125,6 +126,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return res, nil
 	}
 
+	if isGatewayOwnedByService(gw) {
+		log.Debug("Skipping annotated hostname DNS for Gateway owned by a Service", "Gateway", req.NamespacedName)
+		return r.deleteUnmanagedGateway(ctx, gw, req, "Gateway owned by Service, skipping annotation DNS")
+	}
+
 	if !hasUsableGatewayIP(gw) {
 		res, derr := r.deleteUnmanagedGateway(ctx, gw, req, "Gateway has no valid address, DNS records should be deleted")
 		if derr != nil {
@@ -165,7 +171,6 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if dnsErr != nil {
 		return common.ResultRequeueAfter10sec, nil
 	}
-
 	return common.ResultNormal, nil
 }
 
@@ -545,4 +550,37 @@ func (r *GatewayReconciler) registerRouteWatchers(mgr ctrl.Manager) error {
 		}
 	}
 	return nil
+}
+
+// buildEndpointsFromAnnotations parses the hostname annotation on obj, builds extdns endpoints
+// using targets, and validates them against the namespace's allowed DNS zones.
+func (r *GatewayReconciler) buildEndpointsFromAnnotations(obj client.Object, targets extdns.Targets, owner *dns.ResourceRef, gwNN types.NamespacedName) (*dns.AggregatedDNSEndpoints, map[string]string, error) {
+	hosts := extannotations.HostnamesFromAnnotations(obj.GetAnnotations(), servicecommon.AnnotationDNSHostnameKey)
+	if len(hosts) == 0 {
+		return nil, nil, nil
+	}
+	eps := buildEndpoints(hosts, targets, gwNN.String())
+	if len(eps) == 0 {
+		return nil, nil, nil
+	}
+	endpointRows, allowed, err := r.DNS.ValidateEndpointsByZone(obj.GetNamespace(), owner, eps)
+	if err != nil {
+		return nil, allowed, err
+	}
+	if len(endpointRows) == 0 {
+		return nil, allowed, nil
+	}
+	return dns.NewOwnerScopedAggregatedRouteDNS(owner, endpointRows), allowed, nil
+}
+
+// collectGatewayEndpointsByAnnotation builds Gateway owner DNS from hostname annotation + targets.
+func (r *GatewayReconciler) collectGatewayEndpointsByAnnotation(gw *gatewayv1.Gateway, targets extdns.Targets) (*dns.AggregatedDNSEndpoints, map[string]string, error) {
+	owner := &dns.ResourceRef{Kind: dns.ResourceKindGateway, Object: gw.GetObjectMeta()}
+	gwNN := types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}
+	out, allowed, err := r.buildEndpointsFromAnnotations(gw, targets, owner, gwNN)
+	if err != nil {
+		log.Error(err, "Failed to build DNS Endpoints for Gateway annotations", "Gateway", gwNN.String())
+		return nil, allowed, err
+	}
+	return out, allowed, nil
 }
