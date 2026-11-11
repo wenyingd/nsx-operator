@@ -14,10 +14,6 @@ import (
 )
 
 // InitializeDNSRecordService constructs a DNSRecordService and hydrates DNSRecordStore from NSX Policy search.
-// Note: NSX Search API currently does not support searching DNSRecord and DNSZone types.
-// Thus, this initial population will result in an empty store, and resources will be read on-demand
-// (via direct GETs) or created afresh.
-// TODO: Remove this Note once NSX Search API supports DNSRecord.
 func InitializeDNSRecordService(commonService common.Service, vpcService common.VPCServiceProvider) (*DNSRecordService, error) {
 	builder, err := common.PolicyPathDnsRecord.NewPolicyTreeBuilder()
 	if err != nil {
@@ -35,20 +31,13 @@ func InitializeDNSRecordService(commonService common.Service, vpcService common.
 	tags := []model.Tag{{Scope: common.String(common.TagScopeCluster), Tag: common.String(cluster)}}
 
 	wg := sync.WaitGroup{}
-	wgDone := make(chan bool)
-	fatalErrors := make(chan error, 1)
-
 	wg.Add(1)
-	go commonService.InitializeResourceStore(&wg, fatalErrors, common.ResourceTypeDnsRecord, tags, s.DNSRecordStore)
-
-	go func() {
-		wg.Wait()
-		close(wgDone)
-	}()
+	fatalErrors := make(chan error, 1)
+	commonService.InitializeResourceStore(&wg, fatalErrors, common.ResourceTypeDnsRecord, tags, s.DNSRecordStore)
 	select {
-	case <-wgDone:
 	case err := <-fatalErrors:
 		return s, err
+	default:
 	}
 
 	// Warm up DNSZoneMap from zone paths used by records already in the store.
@@ -61,7 +50,7 @@ func InitializeDNSRecordService(commonService common.Service, vpcService common.
 			log.Error(err, "failed to warm up DNS zone cache during initialization", "path", zonePath)
 			continue // non-fatal: will be re-fetched on demand by SyncDNSZonesByVpcNetworkConfig
 		}
-		if zone.DnsDomainName != nil {
+		if zone.DnsDomainName != nil && strings.TrimSpace(*zone.DnsDomainName) != "" {
 			s.DNSZoneMap.set(zonePath, strings.TrimSpace(*zone.DnsDomainName))
 		}
 	}

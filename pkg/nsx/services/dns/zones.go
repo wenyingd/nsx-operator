@@ -4,10 +4,12 @@
 package dns
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
+	apierrors "github.com/vmware/vsphere-automation-sdk-go/lib/vapi/std/errors"
 	"github.com/vmware/vsphere-automation-sdk-go/services/nsxt/model"
 
 	"github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
@@ -110,6 +112,7 @@ func (s *DNSRecordService) ValidateEndpointsByZone(namespace string, owner *Reso
 		}
 		log.Debug("Mapped DNS endpoint to zone", "dnsName", ep.DNSName, "zonePath", zonePath, "recordName", recName)
 		row := NewEndpointRow(ep, zonePath, recName)
+		row.validatedZoneDomain = allowedZones[zonePath]
 		validRows = append(validRows, *row)
 	}
 	return validRows, allowedZones, validationErr
@@ -125,27 +128,66 @@ func (s *DNSRecordService) SyncDNSZonesByVpcNetworkConfig(vpcConfig *v1alpha1.VP
 
 	dnsZoneDomainMapping := make(map[string]string)
 	for _, p := range dnsZonePaths {
-		domain, found := s.DNSZoneMap.get(p)
-		if found {
-			log.Debug("DNS zone domain resolved from cache", "path", p, "domain", domain)
-			dnsZoneDomainMapping[p] = domain
-			continue
-		}
-		log.Info("Fetching DNS zone domain from NSX", "path", p)
-		zone, err := s.getDNSZoneFromNSX(p)
+		domain, err := s.getOrFetchDNSZone(p)
 		if err != nil {
-			log.Error(err, "failed to retrieve DNS zone from NSX", "path", p)
+			var missing *DNSZoneNotFoundError
+			if errors.As(err, &missing) {
+				s.notifyDNSZoneChanges([]string{p})
+				continue
+			}
 			return nil, err
 		}
-		if zone.DnsDomainName == nil {
-			return nil, fmt.Errorf("DNS zone %s returned from NSX with no domain name", p)
-		}
-		domain = strings.TrimSpace(*zone.DnsDomainName)
-		log.Info("DNS zone domain fetched from NSX and cached", "path", p, "domain", domain)
-		s.DNSZoneMap.set(p, domain)
 		dnsZoneDomainMapping[p] = domain
 	}
 	return dnsZoneDomainMapping, nil
+}
+
+// RefreshDNSZone refreshes an empty zone, or bypasses the caches when requested.
+// On a non-NotFound refresh failure, a non-forced lookup returns the cached
+// domain alongside the error so callers can retain it while reporting uncertainty.
+func (s *DNSRecordService) RefreshDNSZone(path string, bypassStore bool) (string, error) {
+	key := dnsZoneLockKey(path)
+	recordArbitrator.lock(key)
+	defer recordArbitrator.unlock(key)
+	cached, found := s.DNSZoneMap.get(path)
+	if !bypassStore && found && s.DNSRecordStore != nil && s.DNSRecordStore.HasActiveRecordsForZone(path) {
+		return cached, nil
+	}
+	domain, err := s.refreshDNSZoneFromNSXLocked(path)
+	var missing *DNSZoneNotFoundError
+	if err != nil && !bypassStore && found && cached != "" && !errors.As(err, &missing) {
+		return cached, err
+	}
+	return domain, err
+}
+
+// The zone lock also covers record writes through their store updates. Keep the
+// lookup and NSX response publication together so an older GET cannot win later.
+func (s *DNSRecordService) getOrFetchDNSZone(path string) (string, error) {
+	key := dnsZoneLockKey(path)
+	recordArbitrator.lock(key)
+	defer recordArbitrator.unlock(key)
+	if domain, found := s.DNSZoneMap.get(path); found {
+		return domain, nil
+	}
+	return s.refreshDNSZoneFromNSXLocked(path)
+}
+
+func (s *DNSRecordService) refreshDNSZoneFromNSXLocked(path string) (string, error) {
+	zone, err := s.getDNSZoneFromNSX(path)
+	if err != nil {
+		var missing *DNSZoneNotFoundError
+		if errors.As(err, &missing) {
+			s.DNSZoneMap.delete(path)
+		}
+		return "", err
+	}
+	if zone.DnsDomainName == nil || strings.TrimSpace(*zone.DnsDomainName) == "" {
+		return "", fmt.Errorf("DNS zone %s returned from NSX with no domain name", path)
+	}
+	domain := strings.TrimSpace(*zone.DnsDomainName)
+	s.DNSZoneMap.set(path, domain)
+	return domain, nil
 }
 
 func (s *DNSRecordService) getDNSZoneFromNSX(zonePath string) (*model.DnsZone, error) {
@@ -155,7 +197,21 @@ func (s *DNSRecordService) getDNSZoneFromNSX(zonePath string) (*model.DnsZone, e
 	}
 	z, err := s.NSXClient.DnsZoneClient.Get(orgID, projectID, dnsServiceID, zoneID)
 	if err != nil {
-		return nil, nsxutil.TransNSXApiError(err)
+		translated := nsxutil.TransNSXApiError(err)
+		var sdkNotFoundValue apierrors.NotFound
+		var sdkNotFoundPointer *apierrors.NotFound
+		isSDKNotFound := errors.As(err, &sdkNotFoundValue) || errors.As(err, &sdkNotFoundPointer)
+		// TransNSXApiError handles SDK error values; normalize its pointer form too.
+		if sdkNotFoundPointer != nil {
+			translated = nsxutil.TransNSXApiError(*sdkNotFoundPointer)
+		}
+		var nsxErr *nsxutil.NSXApiError
+		isNSXNotFound := errors.As(translated, &nsxErr) && nsxErr.Type() == apierrors.ErrorType_NOT_FOUND
+		indexNotReady := isNSXNotFound && nsxErr.ApiError != nil && nsxErr.ErrorCode != nil && *nsxErr.ErrorCode == 500090
+		if !indexNotReady && (isNSXNotFound || isSDKNotFound) {
+			return nil, &DNSZoneNotFoundError{Path: zonePath, Err: translated}
+		}
+		return nil, translated
 	}
 	out := z
 	return &out, nil
